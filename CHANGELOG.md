@@ -1,6 +1,7 @@
 =======
 ## LATEST Changes
 
+* Added `Vehicle.get_telemetry_data()` returning `VehicleTelemetryData` with last-applied control, forward speed, engine RPM, current gear, and per-wheel lateral slip, longitudinal slip, and angular velocity sourced from the Chaos vehicle physics state.
 * Added a GeoProjection engine that parses the OpenDRIVE `geoReference` PROJ string into a typed cartographic projection (Transverse Mercator, UTM, Web Mercator, or Lambert Conformal Conic) and exposes it via `Map.get_geoprojection`. `Map.transform_to_geolocation` and `Map.geolocation_to_transform` now accept an optional projection argument together with the new `carla.GeoProjectionTM`/`GeoProjectionUTM`/`GeoProjectionWebMerc`/`GeoProjectionLCC2SP` and `carla.GeoEllipsoid` types, replacing the previous fixed Mercator conversion.
 * Added support for parsing offsets from OpenDRIVE using optional offset transforms.
 * Added `World.get_imu_sensor_gravity` and `World.set_imu_sensor_gravity` Python APIs to read and configure the gravity constant used by the IMU sensor's accelerometer.
