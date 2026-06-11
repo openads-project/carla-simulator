@@ -86,6 +86,7 @@ enum ESensors {
   CameraGBufferUint8,
   CameraGBufferFloat,
   HSSLidar,
+  TFSensor,
   OdometrySensor
 };
 
@@ -594,6 +595,25 @@ void ROS2::ProcessDataFromOdometry(
         LookupFrameId(actor),
         sensor_transform.location.x, sensor_transform.location.y, sensor_transform.location.z,
         sensor_transform.rotation.pitch, sensor_transform.rotation.yaw, sensor_transform.rotation.roll);
+    transform_publisher->Publish();
+  }
+}
+
+void ROS2::ProcessDataFromTF(
+    carla::streaming::detail::stream_id_type /*stream_id*/,
+    const carla::geom::Transform actor_transform,
+    void *actor) {
+  if (actor == nullptr) {
+    return;
+  }
+
+  if (auto transform_publisher = GetOrCreateTransformPublisher(actor)) {
+    transform_publisher->Write(
+        _seconds, _nanoseconds,
+        ParentFrameOrMap(BuildParentChain(actor)),
+        LookupFrameId(actor),
+        actor_transform.location.x, actor_transform.location.y, actor_transform.location.z,
+        actor_transform.rotation.pitch, actor_transform.rotation.yaw, actor_transform.rotation.roll);
     transform_publisher->Publish();
   }
 }
