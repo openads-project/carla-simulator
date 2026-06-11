@@ -31,6 +31,7 @@
 #include "publishers/CarlaRadarPublisher.h"
 #include "publishers/CarlaIMUPublisher.h"
 #include "publishers/CarlaGNSSPublisher.h"
+#include "publishers/CarlaOdometryPublisher.h"
 #include "publishers/CarlaTransformPublisher.h"
 #include "publishers/CarlaCollisionPublisher.h"
 #include "publishers/BasicPublisher.h"
@@ -84,7 +85,8 @@ enum ESensors {
   SemanticSegmentationCamera_WideAngleLens,
   CameraGBufferUint8,
   CameraGBufferFloat,
-  HSSLidar
+  HSSLidar,
+  OdometrySensor
 };
 
 void ROS2::Enable(bool enable) {
@@ -377,6 +379,12 @@ std::shared_ptr<BasePublisher> ROS2::GetOrCreateSensor(
           BuildBaseTopicName(actor), LookupFrameId(actor));
       break;
     }
+    case ESensors::OdometrySensor: {
+      resolve("odometry");
+      publisher = std::make_shared<CarlaOdometryPublisher>(
+          BuildBaseTopicName(actor), LookupFrameId(actor));
+      break;
+    }
     case ESensors::LaneInvasionSensor:
     case ESensors::ObstacleDetectionSensor:
     case ESensors::RssSensor:
@@ -545,6 +553,38 @@ void ROS2::ProcessDataFromIMU(
         accelerometer.x, accelerometer.y, accelerometer.z,
         gyroscope.x, gyroscope.y, gyroscope.z,
         compass);
+    publisher->Publish();
+  }
+  if (auto transform_publisher = GetOrCreateTransformPublisher(actor)) {
+    transform_publisher->Write(
+        _seconds, _nanoseconds,
+        ParentFrameOrMap(BuildParentChain(actor)),
+        LookupFrameId(actor),
+        sensor_transform.location.x, sensor_transform.location.y, sensor_transform.location.z,
+        sensor_transform.rotation.pitch, sensor_transform.rotation.yaw, sensor_transform.rotation.roll);
+    transform_publisher->Publish();
+  }
+}
+
+void ROS2::ProcessDataFromOdometry(
+    uint64_t /*sensor_type*/,
+    carla::streaming::detail::stream_id_type stream_id,
+    const carla::geom::Transform sensor_transform,
+    const carla::geom::Transform odometry_transform,
+    carla::geom::Vector3D linear_velocity,
+    carla::geom::Vector3D angular_velocity,
+    void *actor,
+    bool /*has_parent*/) {
+  if (auto base = GetOrCreateSensor(ESensors::OdometrySensor, stream_id, actor)) {
+    auto publisher = std::dynamic_pointer_cast<CarlaOdometryPublisher>(base);
+    const std::string parent_chain = BuildParentChain(actor);
+    publisher->Write(
+        _seconds, _nanoseconds,
+        parent_chain.empty() ? LookupFrameId(actor) : parent_chain,
+        odometry_transform.location.x, odometry_transform.location.y, odometry_transform.location.z,
+        odometry_transform.rotation.pitch, odometry_transform.rotation.yaw, odometry_transform.rotation.roll,
+        linear_velocity.x, linear_velocity.y, linear_velocity.z,
+        angular_velocity.x, angular_velocity.y, angular_velocity.z);
     publisher->Publish();
   }
   if (auto transform_publisher = GetOrCreateTransformPublisher(actor)) {
