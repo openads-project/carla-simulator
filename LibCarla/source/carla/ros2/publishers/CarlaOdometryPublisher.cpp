@@ -45,9 +45,8 @@ bool CarlaOdometryPublisher::Write(
     float pitch_deg, float yaw_deg, float roll_deg,
     float linear_x, float linear_y, float linear_z,
     float angular_x, float angular_y, float angular_z) {
-  constexpr float to_meters = 1e-2f;
   const auto transform = TransformFromCarlaRotation(
-      tx * to_meters, ty * to_meters, tz * to_meters,
+      tx, ty, tz,
       pitch_deg, yaw_deg, roll_deg);
 
   auto *message = _impl->GetMessage();
