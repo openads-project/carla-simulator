@@ -12,6 +12,8 @@
 #include "carla/ros2/types/Odometry.h"
 #include "carla/ros2/types/OdometryPubSubTypes.h"
 
+#include <array>
+#include <cmath>
 #include <utility>
 
 namespace carla {
@@ -21,6 +23,50 @@ struct CarlaOdometryMsgTraits {
   using msg_type = nav_msgs::msg::Odometry;
   using msg_pubsub_type = nav_msgs::msg::OdometryPubSubType;
 };
+
+namespace {
+
+constexpr float ToRadians(float degrees) {
+  return degrees * (static_cast<float>(M_PI) / 180.0f);
+}
+
+std::array<float, 3> CarlaVectorToRosVectorRotated(
+    float x, float y, float z,
+    float pitch, float yaw, float roll) {
+  // Mirrors carla_common.transforms.carla_vector_to_ros_vector_rotated().
+  const float ros_pitch = ToRadians(-pitch);
+  const float ros_yaw = ToRadians(-yaw);
+  const float ros_roll = ToRadians(roll);
+
+  const float cy = std::cos(ros_yaw);
+  const float sy = std::sin(ros_yaw);
+  const float cp = std::cos(ros_pitch);
+  const float sp = std::sin(ros_pitch);
+  const float cr = std::cos(ros_roll);
+  const float sr = std::sin(ros_roll);
+
+  const float rotated_x =
+      x * (cy * cp) +
+      y * (cy * sp * sr - sy * cr) +
+      z * (cy * sp * cr + sy * sr);
+  const float rotated_y =
+      x * (sy * cp) +
+      y * (sy * sp * sr + cy * cr) +
+      z * (sy * sp * cr - cy * sr);
+  const float rotated_z =
+      x * (-sp) +
+      y * (cp * sr) +
+      z * (cp * cr);
+
+  return {rotated_x, -rotated_y, rotated_z};
+}
+
+std::array<float, 3> CarlaAngularVelocityToRosVector(
+    float angular_x, float angular_y, float angular_z) {
+  return {ToRadians(angular_x), -ToRadians(angular_y), -ToRadians(angular_z)};
+}
+
+}  // namespace
 
 CarlaOdometryPublisher::CarlaOdometryPublisher(
     std::string base_topic_name, std::string frame_id)
@@ -63,12 +109,15 @@ bool CarlaOdometryPublisher::Write(
   message->pose().pose().orientation().y(transform.rotation[2]);
   message->pose().pose().orientation().z(transform.rotation[3]);
 
-  message->twist().twist().linear().x(linear_x);
-  message->twist().twist().linear().y(-linear_y);
-  message->twist().twist().linear().z(linear_z);
-  message->twist().twist().angular().x(angular_x);
-  message->twist().twist().angular().y(-angular_y);
-  message->twist().twist().angular().z(angular_z);
+  const auto linear = CarlaVectorToRosVectorRotated(
+      linear_x, linear_y, linear_z, pitch_deg, yaw_deg, roll_deg);
+  const auto angular = CarlaAngularVelocityToRosVector(angular_x, angular_y, angular_z);
+  message->twist().twist().linear().x(linear[0]);
+  message->twist().twist().linear().y(linear[1]);
+  message->twist().twist().linear().z(linear[2]);
+  message->twist().twist().angular().x(angular[0]);
+  message->twist().twist().angular().y(angular[1]);
+  message->twist().twist().angular().z(angular[2]);
   return true;
 }
 
