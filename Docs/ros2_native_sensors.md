@@ -92,6 +92,11 @@ CARLA server is responsible for publishing the Clock (/clock) based on the simul
 |-------|------|
 | `/carla/[<PARENT ROLE NAME>]/<SENSOR ROLE NAME>` | [nav_msgs/Odometry](https://docs.ros.org/en/api/nav_msgs/html/msg/Odometry.html) |
 
+###### TF
+
+| Topic | Type |
+|-------|------|
+| `/tf` | [tf2_msgs/TFMessage](https://docs.ros.org/en/api/tf2_msgs/html/msg/TFMessage.html) |
 
 ###### Lane Invasion Sensor
 
