@@ -236,8 +236,7 @@ protected:
           W, H,
           Fov,
           BufferView,
-          &Sensor,
-          ParentActor != nullptr);
+          &Sensor);
       });
     }
 #endif

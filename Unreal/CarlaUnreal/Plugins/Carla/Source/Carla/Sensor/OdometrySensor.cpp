@@ -124,8 +124,7 @@ void AOdometrySensor::PostPhysTick(UWorld *World, ELevelTick TickType, float Del
           OdometryTransform,
           carla::geom::Vector3D(LinearVelocity.X, LinearVelocity.Y, LinearVelocity.Z),
           carla::geom::Vector3D(AngularVelocity.X, AngularVelocity.Y, AngularVelocity.Z),
-          this,
-          true);
+          this);
     }
     else
     {
@@ -136,8 +135,7 @@ void AOdometrySensor::PostPhysTick(UWorld *World, ELevelTick TickType, float Del
           OdometryTransform,
           carla::geom::Vector3D(LinearVelocity.X, LinearVelocity.Y, LinearVelocity.Z),
           carla::geom::Vector3D(AngularVelocity.X, AngularVelocity.Y, AngularVelocity.Z),
-          this,
-          false);
+          this);
     }
   }
 #endif

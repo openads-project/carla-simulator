@@ -111,8 +111,7 @@ void ACollisionSensor::OnCollisionEvent(
         LocalTransformRelativeToParent,
         OtherActor->GetUniqueID(),
         NormalImpulseVector,
-        this,
-        true);
+        this);
     }
     else
     {
@@ -121,8 +120,7 @@ void ACollisionSensor::OnCollisionEvent(
         GetActorTransform(),
         OtherActor->GetUniqueID(),
         NormalImpulseVector,
-        this,
-        false);
+        this);
     }
   }
 #endif

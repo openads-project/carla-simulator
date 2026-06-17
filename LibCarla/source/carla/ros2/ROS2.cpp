@@ -436,8 +436,7 @@ void ROS2::ProcessDataFromCamera(
     const carla::geom::Transform sensor_transform,
     int W, int H, float Fov,
     const carla::SharedBufferView buffer,
-    void *actor,
-    bool /*has_parent*/) {
+    void *actor) {
   // Image dimensions + FOV are now read straight from ImageSerializer's
   // per-frame header inside the camera publisher's WriteCameraInfo call;
   // the W/H/Fov arguments survive for ABI compatibility with the
@@ -520,8 +519,7 @@ void ROS2::ProcessDataFromGNSS(
     carla::streaming::detail::stream_id_type stream_id,
     const carla::geom::Transform sensor_transform,
     const carla::geom::GeoLocation &data,
-    void *actor,
-    bool /*has_parent*/) {
+    void *actor) {
   if (auto base = GetOrCreateSensor(ESensors::GnssSensor, stream_id, actor)) {
     auto publisher = std::dynamic_pointer_cast<CarlaGNSSPublisher>(base);
     publisher->Write(_seconds, _nanoseconds, data.latitude, data.longitude, data.altitude);
@@ -545,8 +543,7 @@ void ROS2::ProcessDataFromIMU(
     carla::geom::Vector3D accelerometer,
     carla::geom::Vector3D gyroscope,
     float compass,
-    void *actor,
-    bool /*has_parent*/) {
+    void *actor) {
   if (auto base = GetOrCreateSensor(ESensors::InertialMeasurementUnit, stream_id, actor)) {
     auto publisher = std::dynamic_pointer_cast<CarlaIMUPublisher>(base);
     publisher->Write(
@@ -574,8 +571,7 @@ void ROS2::ProcessDataFromOdometry(
     const carla::geom::Transform odometry_transform,
     carla::geom::Vector3D linear_velocity,
     carla::geom::Vector3D angular_velocity,
-    void *actor,
-    bool /*has_parent*/) {
+    void *actor) {
   if (auto base = GetOrCreateSensor(ESensors::OdometrySensor, stream_id, actor)) {
     auto publisher = std::dynamic_pointer_cast<CarlaOdometryPublisher>(base);
     const std::string parent_chain = BuildParentChain(actor);
@@ -624,8 +620,7 @@ void ROS2::ProcessDataFromDVS(
     const carla::geom::Transform sensor_transform,
     const carla::SharedBufferView buffer,
     int /*W*/, int /*H*/, float /*Fov*/,
-    void *actor,
-    bool /*has_parent*/) {
+    void *actor) {
   if (auto base = GetOrCreateSensor(ESensors::DVSCamera, stream_id, actor)) {
     auto publisher = std::dynamic_pointer_cast<CarlaDVSCameraPublisher>(base);
     const auto *header = reinterpret_cast<
@@ -664,8 +659,7 @@ void ROS2::ProcessDataFromLidar(
     carla::streaming::detail::stream_id_type stream_id,
     const carla::geom::Transform sensor_transform,
     carla::sensor::data::LidarData &data,
-    void *actor,
-    bool /*has_parent*/) {
+    void *actor) {
   if (auto base = GetOrCreateSensor(ESensors::RayCastLidar, stream_id, actor)) {
     auto publisher = std::dynamic_pointer_cast<CarlaLidarPublisher>(base);
     // The lidar returns a flat list of floats rather than structured detection
@@ -693,8 +687,7 @@ void ROS2::ProcessDataFromSemanticLidar(
     carla::streaming::detail::stream_id_type stream_id,
     const carla::geom::Transform sensor_transform,
     carla::sensor::data::SemanticLidarData &data,
-    void *actor,
-    bool /*has_parent*/) {
+    void *actor) {
   if (auto base = GetOrCreateSensor(ESensors::RayCastSemanticLidar, stream_id, actor)) {
     auto publisher = std::dynamic_pointer_cast<CarlaSemanticLidarPublisher>(base);
     const auto width = static_cast<std::uint32_t>(data._ser_points.size());
@@ -719,8 +712,7 @@ void ROS2::ProcessDataFromRadar(
     carla::streaming::detail::stream_id_type stream_id,
     const carla::geom::Transform sensor_transform,
     const carla::sensor::data::RadarData &data,
-    void *actor,
-    bool /*has_parent*/) {
+    void *actor) {
   if (auto base = GetOrCreateSensor(ESensors::Radar, stream_id, actor)) {
     auto publisher = std::dynamic_pointer_cast<CarlaRadarPublisher>(base);
     const auto width = static_cast<std::uint32_t>(data.GetDetectionCount());
@@ -759,8 +751,7 @@ void ROS2::ProcessDataFromCollisionSensor(
     const carla::geom::Transform sensor_transform,
     uint32_t other_actor,
     carla::geom::Vector3D impulse,
-    void *actor,
-    bool /*has_parent*/) {
+    void *actor) {
   if (auto base = GetOrCreateSensor(ESensors::CollisionSensor, stream_id, actor)) {
     auto publisher = std::dynamic_pointer_cast<CarlaCollisionPublisher>(base);
     publisher->Write(_seconds, _nanoseconds, other_actor, impulse.x, impulse.y, impulse.z);
