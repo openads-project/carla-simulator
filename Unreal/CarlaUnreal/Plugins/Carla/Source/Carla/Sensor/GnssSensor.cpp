@@ -45,6 +45,9 @@ void AGnssSensor::PostPhysTick(UWorld *World, ELevelTick TickType, float DeltaSe
     ActorLocation = LargeMap->LocalToGlobalLocation(ActorLocation);
   }
   carla::geom::Location Location = ActorLocation;
+  // Preserve the legacy GNSS convention: Unreal/CARLA +Y points opposite to
+  // geographic northing, so latitude must increase when CARLA Y decreases.
+  Location.y = -Location.y;
   carla::geom::GeoLocation CurrentLocation = CurrentGeoProjection.TransformToGeoLocation(Location);
 
   // Compute the noise for the sensor

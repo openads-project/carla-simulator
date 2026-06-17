@@ -157,6 +157,7 @@ void ROS2::UnregisterSensor(void *actor) {
   _publishers.erase(actor);
   _camera_publishers.erase(actor);
   _transforms.erase(actor);
+  _actor_tf_transforms.erase(actor);
   _actor_parents.erase(actor);
   _registrations.erase(actor);
 }
@@ -407,15 +408,19 @@ std::shared_ptr<BasePublisher> ROS2::GetOrCreateSensor(
 }
 
 std::shared_ptr<CarlaTransformPublisher> ROS2::GetOrCreateTransformPublisher(void *actor) {
+  const bool is_static_transform = !BuildParentChain(actor).empty();
   auto it = _transforms.find(actor);
   if (it != _transforms.end()) {
-    return it->second;
+    if (it->second->IsStatic() == is_static_transform) {
+      return it->second;
+    }
+    _transforms.erase(it);
   }
   auto registration_it = _registrations.find(actor);
   if (registration_it == _registrations.end() || !registration_it->second.publish_tf) {
     return nullptr;
   }
-  auto transform = std::make_shared<CarlaTransformPublisher>();
+  auto transform = std::make_shared<CarlaTransformPublisher>(is_static_transform);
   _transforms.insert({actor, transform});
   return transform;
 }
@@ -423,9 +428,24 @@ std::shared_ptr<CarlaTransformPublisher> ROS2::GetOrCreateTransformPublisher(voi
 namespace {
 
 // Builds the parent_frame_id for TF: top-level actors broadcast against
-// "map"; child actors broadcast against their direct parent's frame_id.
-std::string ParentFrameOrMap(const std::string &parent_chain) {
-  return parent_chain.empty() ? std::string{"map"} : parent_chain;
+// "carla_map"; child actors broadcast against their direct parent's frame_id.
+std::string ParentFrameOrCarlaMap(const std::string &parent_chain) {
+  return parent_chain.empty() ? std::string{"carla_map"} : parent_chain;
+}
+
+std::string ActorTfFrameId(const std::string &frame_id) {
+  constexpr char kTfSuffix[] = "_tf";
+  if (frame_id.empty()) {
+    return std::string{};
+  }
+  if (frame_id.size() >= sizeof(kTfSuffix) - 1
+      && frame_id.compare(
+          frame_id.size() - (sizeof(kTfSuffix) - 1),
+          sizeof(kTfSuffix) - 1,
+          kTfSuffix) == 0) {
+    return frame_id;
+  }
+  return frame_id + kTfSuffix;
 }
 
 }  // namespace
@@ -506,7 +526,7 @@ void ROS2::ProcessDataFromCamera(
   if (auto transform_publisher = GetOrCreateTransformPublisher(actor)) {
     transform_publisher->Write(
         _seconds, _nanoseconds,
-        ParentFrameOrMap(BuildParentChain(actor)),
+        ParentFrameOrCarlaMap(BuildParentChain(actor)),
         LookupFrameId(actor),
         sensor_transform.location.x, sensor_transform.location.y, sensor_transform.location.z,
         sensor_transform.rotation.pitch, sensor_transform.rotation.yaw, sensor_transform.rotation.roll);
@@ -528,7 +548,7 @@ void ROS2::ProcessDataFromGNSS(
   if (auto transform_publisher = GetOrCreateTransformPublisher(actor)) {
     transform_publisher->Write(
         _seconds, _nanoseconds,
-        ParentFrameOrMap(BuildParentChain(actor)),
+        ParentFrameOrCarlaMap(BuildParentChain(actor)),
         LookupFrameId(actor),
         sensor_transform.location.x, sensor_transform.location.y, sensor_transform.location.z,
         sensor_transform.rotation.pitch, sensor_transform.rotation.yaw, sensor_transform.rotation.roll);
@@ -556,7 +576,7 @@ void ROS2::ProcessDataFromIMU(
   if (auto transform_publisher = GetOrCreateTransformPublisher(actor)) {
     transform_publisher->Write(
         _seconds, _nanoseconds,
-        ParentFrameOrMap(BuildParentChain(actor)),
+        ParentFrameOrCarlaMap(BuildParentChain(actor)),
         LookupFrameId(actor),
         sensor_transform.location.x, sensor_transform.location.y, sensor_transform.location.z,
         sensor_transform.rotation.pitch, sensor_transform.rotation.yaw, sensor_transform.rotation.roll);
@@ -587,7 +607,7 @@ void ROS2::ProcessDataFromOdometry(
   if (auto transform_publisher = GetOrCreateTransformPublisher(actor)) {
     transform_publisher->Write(
         _seconds, _nanoseconds,
-        ParentFrameOrMap(BuildParentChain(actor)),
+        ParentFrameOrCarlaMap(BuildParentChain(actor)),
         LookupFrameId(actor),
         sensor_transform.location.x, sensor_transform.location.y, sensor_transform.location.z,
         sensor_transform.rotation.pitch, sensor_transform.rotation.yaw, sensor_transform.rotation.roll);
@@ -603,15 +623,30 @@ void ROS2::ProcessDataFromTF(
     return;
   }
 
-  if (auto transform_publisher = GetOrCreateTransformPublisher(actor)) {
-    transform_publisher->Write(
-        _seconds, _nanoseconds,
-        ParentFrameOrMap(BuildParentChain(actor)),
-        LookupFrameId(actor),
-        actor_transform.location.x, actor_transform.location.y, actor_transform.location.z,
-        actor_transform.rotation.pitch, actor_transform.rotation.yaw, actor_transform.rotation.roll);
-    transform_publisher->Publish();
+  auto registration_it = _registrations.find(actor);
+  if (registration_it == _registrations.end() || !registration_it->second.publish_tf) {
+    return;
   }
+
+  auto transform_it = _actor_tf_transforms.find(actor);
+  if (transform_it == _actor_tf_transforms.end()) {
+    transform_it = _actor_tf_transforms
+        .insert({actor, std::make_shared<CarlaTransformPublisher>(false)})
+        .first;
+  }
+
+  const std::string child_frame_id = ActorTfFrameId(LookupFrameId(actor));
+  if (child_frame_id.empty()) {
+    return;
+  }
+
+  transform_it->second->Write(
+      _seconds, _nanoseconds,
+      "carla_map",
+      child_frame_id,
+      actor_transform.location.x, actor_transform.location.y, actor_transform.location.z,
+      actor_transform.rotation.pitch, actor_transform.rotation.yaw, actor_transform.rotation.roll);
+  transform_it->second->Publish();
 }
 
 void ROS2::ProcessDataFromDVS(
@@ -646,7 +681,7 @@ void ROS2::ProcessDataFromDVS(
   if (auto transform_publisher = GetOrCreateTransformPublisher(actor)) {
     transform_publisher->Write(
         _seconds, _nanoseconds,
-        ParentFrameOrMap(BuildParentChain(actor)),
+        ParentFrameOrCarlaMap(BuildParentChain(actor)),
         LookupFrameId(actor),
         sensor_transform.location.x, sensor_transform.location.y, sensor_transform.location.z,
         sensor_transform.rotation.pitch, sensor_transform.rotation.yaw, sensor_transform.rotation.roll);
@@ -674,7 +709,7 @@ void ROS2::ProcessDataFromLidar(
   if (auto transform_publisher = GetOrCreateTransformPublisher(actor)) {
     transform_publisher->Write(
         _seconds, _nanoseconds,
-        ParentFrameOrMap(BuildParentChain(actor)),
+        ParentFrameOrCarlaMap(BuildParentChain(actor)),
         LookupFrameId(actor),
         sensor_transform.location.x, sensor_transform.location.y, sensor_transform.location.z,
         sensor_transform.rotation.pitch, sensor_transform.rotation.yaw, sensor_transform.rotation.roll);
@@ -699,7 +734,7 @@ void ROS2::ProcessDataFromSemanticLidar(
   if (auto transform_publisher = GetOrCreateTransformPublisher(actor)) {
     transform_publisher->Write(
         _seconds, _nanoseconds,
-        ParentFrameOrMap(BuildParentChain(actor)),
+        ParentFrameOrCarlaMap(BuildParentChain(actor)),
         LookupFrameId(actor),
         sensor_transform.location.x, sensor_transform.location.y, sensor_transform.location.z,
         sensor_transform.rotation.pitch, sensor_transform.rotation.yaw, sensor_transform.rotation.roll);
@@ -724,7 +759,7 @@ void ROS2::ProcessDataFromRadar(
   if (auto transform_publisher = GetOrCreateTransformPublisher(actor)) {
     transform_publisher->Write(
         _seconds, _nanoseconds,
-        ParentFrameOrMap(BuildParentChain(actor)),
+        ParentFrameOrCarlaMap(BuildParentChain(actor)),
         LookupFrameId(actor),
         sensor_transform.location.x, sensor_transform.location.y, sensor_transform.location.z,
         sensor_transform.rotation.pitch, sensor_transform.rotation.yaw, sensor_transform.rotation.roll);
@@ -760,7 +795,7 @@ void ROS2::ProcessDataFromCollisionSensor(
   if (auto transform_publisher = GetOrCreateTransformPublisher(actor)) {
     transform_publisher->Write(
         _seconds, _nanoseconds,
-        ParentFrameOrMap(BuildParentChain(actor)),
+        ParentFrameOrCarlaMap(BuildParentChain(actor)),
         LookupFrameId(actor),
         sensor_transform.location.x, sensor_transform.location.y, sensor_transform.location.z,
         sensor_transform.rotation.pitch, sensor_transform.rotation.yaw, sensor_transform.rotation.roll);
@@ -775,11 +810,15 @@ void ROS2::Shutdown() {
   for (auto &element : _transforms) {
     element.second.reset();
   }
+  for (auto &element : _actor_tf_transforms) {
+    element.second.reset();
+  }
   for (auto &element : _camera_publishers) {
     element.second.reset();
   }
   _publishers.clear();
   _transforms.clear();
+  _actor_tf_transforms.clear();
   _camera_publishers.clear();
   _subscribers.clear();
   _actor_callbacks.clear();

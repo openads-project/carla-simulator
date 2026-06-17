@@ -229,6 +229,7 @@ private:
   std::unordered_map<void *, std::shared_ptr<BasePublisher>> _publishers;
   std::unordered_map<void *, std::shared_ptr<CarlaCameraPublisher>> _camera_publishers;
   std::unordered_map<void *, std::shared_ptr<CarlaTransformPublisher>> _transforms;
+  std::unordered_map<void *, std::shared_ptr<CarlaTransformPublisher>> _actor_tf_transforms;
   std::unordered_set<carla::streaming::detail::stream_id_type> _publish_stream;
   std::unordered_map<void *, ActorCallback> _actor_callbacks;
   std::unordered_multimap<void *, std::shared_ptr<BaseSubscriber>> _subscribers;

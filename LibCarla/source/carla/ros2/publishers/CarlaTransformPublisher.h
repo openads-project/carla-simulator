@@ -20,16 +20,16 @@ namespace ros2 {
 template <typename Traits> class PublisherImpl;
 struct CarlaTransformMsgTraits;
 
-// Publishes tf2_msgs::msg::TFMessage to the global "rt/tf" topic. Each
-// sensor owns its own instance and contributes one TransformStamped per
-// tick; subscribers see the full set fanned out across the topic. Callers
+// Publishes tf2_msgs::msg::TFMessage to the global "rt/tf" or "rt/tf_static"
+// topic. Each sensor owns its own instance and contributes one
+// TransformStamped per tick; subscribers see the full set fanned out. Callers
 // hand in raw float translation + Euler degrees so the header does not
 // include carla::geom::Transform (pulls MsgPack + Boost via
 // carla/MsgPack.h — neither is on the include path of the
 // carla-ros2-native ExternalProject).
 class CarlaTransformPublisher : public BasePublisher {
 public:
-  CarlaTransformPublisher();
+  explicit CarlaTransformPublisher(bool is_static = false);
   ~CarlaTransformPublisher() override;
 
   CarlaTransformPublisher(const CarlaTransformPublisher &) = delete;
@@ -38,6 +38,7 @@ public:
   CarlaTransformPublisher &operator=(CarlaTransformPublisher &&) noexcept = default;
 
   bool Publish() override;
+  bool IsStatic() const noexcept { return _is_static; }
 
   // Builds a TransformStamped(parent_frame_id -> child_frame_id) from the
   // given CARLA-handed translation + Euler-degree rotation and stages it
@@ -67,6 +68,8 @@ public:
 private:
   std::shared_ptr<PublisherImpl<CarlaTransformMsgTraits>> _impl;
   std::unordered_map<std::string, CachedTransform> _last_transforms;
+  bool _is_static{false};
+  bool _has_published{false};
 };
 
 }  // namespace ros2
