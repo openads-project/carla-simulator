@@ -2,8 +2,7 @@ image: docker:24.0.7
 
 workflow:
   rules:
-    - if: $CI_COMMIT_BRANCH == "ue5-dev"
-    - if: $CI_COMMIT_BRANCH == "ue5-openads"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_PIPELINE_SOURCE == "web"
 
 variables:
@@ -317,7 +316,7 @@ build-release-docker-image:
     - |
       if [ -n "$CI_COMMIT_TAG" ]; then
         export image_publish_postfix=$CI_COMMIT_TAG
-      elif [ "$CI_COMMIT_BRANCH" = "ue5-openads" ]; then
+      elif [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
         export image_publish_postfix=latest
       else
         export image_publish_postfix=${CI_COMMIT_REF_SLUG}_${CI_COMMIT_SHORT_SHA}

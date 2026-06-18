@@ -3,12 +3,12 @@ name: Build CARLA on Ubuntu
 on:
   push:
     branches:
-      - ue5-openads
+      - main
     tags:
       - "*"
   pull_request:
     branches:
-      - ue5-openads
+      - main
   workflow_dispatch:
    
 concurrency:
