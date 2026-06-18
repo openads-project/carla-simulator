@@ -121,6 +121,18 @@ public:
       carla::geom::Vector3D gyroscope,
       float compass,
       void *actor = nullptr);
+  void ProcessDataFromOdometry(
+      uint64_t sensor_type,
+      carla::streaming::detail::stream_id_type stream_id,
+      const carla::geom::Transform sensor_transform,
+      const carla::geom::Transform odometry_transform,
+      carla::geom::Vector3D linear_velocity,
+      carla::geom::Vector3D angular_velocity,
+      void *actor = nullptr);
+  void ProcessDataFromTF(
+      carla::streaming::detail::stream_id_type stream_id,
+      const carla::geom::Transform actor_transform,
+      void *actor = nullptr);
   void ProcessDataFromDVS(
       uint64_t sensor_type,
       carla::streaming::detail::stream_id_type stream_id,
@@ -217,6 +229,7 @@ private:
   std::unordered_map<void *, std::shared_ptr<BasePublisher>> _publishers;
   std::unordered_map<void *, std::shared_ptr<CarlaCameraPublisher>> _camera_publishers;
   std::unordered_map<void *, std::shared_ptr<CarlaTransformPublisher>> _transforms;
+  std::unordered_map<void *, std::shared_ptr<CarlaTransformPublisher>> _actor_tf_transforms;
   std::unordered_set<carla::streaming::detail::stream_id_type> _publish_stream;
   std::unordered_map<void *, ActorCallback> _actor_callbacks;
   std::unordered_multimap<void *, std::shared_ptr<BaseSubscriber>> _subscribers;

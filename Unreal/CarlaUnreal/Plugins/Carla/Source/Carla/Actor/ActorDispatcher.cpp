@@ -228,7 +228,8 @@ FCarlaActor* UActorDispatcher::RegisterActor(
       bool bEnableAckermannControl = false;
       for (auto &&Attr : Description.Variations)
       {
-        if (Attr.Key == "role_name" && (Attr.Value.Value == "hero" || Attr.Value.Value == "ego"))
+        if (Attr.Key == "role_name" &&
+            (Attr.Value.Value == "hero" || Attr.Value.Value == "ego" || Attr.Value.Value == "ego_vehicle"))
         {
           bIsHero = true;
         }

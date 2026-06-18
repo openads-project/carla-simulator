@@ -64,7 +64,7 @@ public:
       efd::DomainParticipantFactory::get_instance()->delete_participant(_participant);
   }
 
-  bool Init(std::string topic_name) {
+  bool Init(std::string topic_name, bool transient_local = false) {
     if (_type == nullptr) {
       log_error("PublisherImpl::Init invalid TypeSupport");
       return false;
@@ -99,6 +99,12 @@ public:
     }
 
     efd::DataWriterQos wqos = efd::DATAWRITER_QOS_DEFAULT;
+    if (transient_local) {
+      wqos.durability().kind = efd::TRANSIENT_LOCAL_DURABILITY_QOS;
+      wqos.reliability().kind = efd::RELIABLE_RELIABILITY_QOS;
+      wqos.history().kind = efd::KEEP_LAST_HISTORY_QOS;
+      wqos.history().depth = 1;
+    }
     wqos.endpoint().history_memory_policy =
         eprosima::fastrtps::rtps::PREALLOCATED_WITH_REALLOC_MEMORY_MODE;
     efd::DataWriterListener *listener = static_cast<efd::DataWriterListener *>(this);

@@ -40,18 +40,28 @@ bool IsSameTransform(
 
 }  // namespace
 
-CarlaTransformPublisher::CarlaTransformPublisher()
-  : BasePublisher("rt/tf"),
-    _impl(std::make_shared<PublisherImpl<CarlaTransformMsgTraits>>()) {
-  if (!_impl->Init(GetBaseTopicName())) {
-    log_error("CarlaTransformPublisher: failed to initialise writer for rt/tf");
+CarlaTransformPublisher::CarlaTransformPublisher(bool is_static)
+  : BasePublisher(is_static ? "rt/tf_static" : "rt/tf"),
+    _impl(std::make_shared<PublisherImpl<CarlaTransformMsgTraits>>()),
+    _is_static(is_static) {
+  if (!_impl->Init(GetBaseTopicName(), _is_static)) {
+    log_error(
+        "CarlaTransformPublisher: failed to initialise writer for ",
+        GetBaseTopicName());
   }
 }
 
 CarlaTransformPublisher::~CarlaTransformPublisher() = default;
 
 bool CarlaTransformPublisher::Publish() {
-  return _impl->Publish();
+  if (_is_static && _has_published) {
+    return true;
+  }
+  const bool published = _impl->Publish();
+  if (published) {
+    _has_published = true;
+  }
+  return published;
 }
 
 bool CarlaTransformPublisher::Write(
@@ -83,8 +93,8 @@ bool CarlaTransformPublisher::Write(
   }
 
   geometry_msgs::msg::TransformStamped ts;
-  ts.header().stamp().sec(seconds);
-  ts.header().stamp().nanosec(nanoseconds);
+  ts.header().stamp().sec(_is_static ? 0 : seconds);
+  ts.header().stamp().nanosec(_is_static ? 0u : nanoseconds);
   ts.header().frame_id(parent_frame_id);
   ts.child_frame_id(child_frame_id);
 

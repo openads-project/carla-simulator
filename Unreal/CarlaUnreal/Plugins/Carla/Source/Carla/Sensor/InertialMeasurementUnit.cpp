@@ -138,6 +138,30 @@ carla::geom::Vector3D AInertialMeasurementUnit::ComputeAccelerometer(
 
   FQuat ImuRotation =
       GetRootComponent()->GetComponentTransform().GetRotation();
+  if (bIgnoreTilt)
+  {
+    AActor *ParentActor = GetAttachParentActor();
+    if (ParentActor != nullptr)
+    {
+      FTransform ParentTransform = ParentActor->GetActorTransform();
+      FRotator ParentRotation = ParentTransform.Rotator();
+      ParentRotation.Roll = 0.0f;
+      ParentRotation.Pitch = 0.0f;
+      ParentTransform.SetRotation(ParentRotation.Quaternion());
+      const FTransform SensorTransformRelativeToParent =
+          GetActorTransform().GetRelativeTransform(
+              ParentActor->GetActorTransform());
+      ImuRotation =
+          (SensorTransformRelativeToParent * ParentTransform).GetRotation();
+    }
+    else
+    {
+      FRotator ImuRotator = ImuRotation.Rotator();
+      ImuRotator.Roll = 0.0f;
+      ImuRotator.Pitch = 0.0f;
+      ImuRotation = ImuRotator.Quaternion();
+    }
+  }
   FVectorAccelerometer = ImuRotation.UnrotateVector(FVectorAccelerometer);
 
   // Cast from FVector to our Vector3D to correctly send the data in m/s^2
@@ -234,6 +258,11 @@ void AInertialMeasurementUnit::SetGyroscopeStandardDeviation(const FVector &Vec)
 void AInertialMeasurementUnit::SetGyroscopeBias(const FVector &Vec)
 {
   BiasGyro = Vec;
+}
+
+void AInertialMeasurementUnit::SetIgnoreTilt(bool IgnoreTilt)
+{
+  bIgnoreTilt = IgnoreTilt;
 }
 
 const FVector &AInertialMeasurementUnit::GetAccelerationStandardDeviation() const

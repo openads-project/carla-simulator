@@ -1,6 +1,31 @@
-CARLA Simulator
-===============
+# carla-simulator
 
+<p align="center">
+  <a href="https://github.com/openads-project"><img src="https://img.shields.io/badge/OpenADS-f5ff01"/></a>
+  <a href="https://github.com/openads-project/carla-simulator/releases/latest"><img src="https://img.shields.io/github/v/release/openads-project/carla-simulator"/></a>
+  <a href="https://github.com/openads-project/carla-simulator/blob/main/LICENSE"><img src="https://img.shields.io/github/license/openads-project/carla-simulator"/></a>
+  <br>
+  <img src="https://img.shields.io/badge/Ubuntu-24.04-E95420"/>
+  <img src="https://img.shields.io/badge/CARLA-0.10.0-blueviolet"/>
+  <img src="https://img.shields.io/badge/Python-3.12-blueviolet"/>
+  <a href="https://www.ros.org"><img src="https://img.shields.io/badge/ROS 2-jazzy-22314e"/></a>
+  <a href="https://github.com/openads-project/carla-simulator/actions/workflows/ci-ubuntu.yml"><img src="https://github.com/openads-project/carla-simulator/actions/workflows/ci-ubuntu.yml/badge.svg"/></a>
+</p>
+
+**High-fidelity rendering and physics backend based on CARLA for closed-loop sensor and vehicle simulation**
+
+> [!IMPORTANT]
+> This repository is a fork of the official [CARLA simulator](https://github.com/carla-simulator/carla). All initial and following modifications to the original repository are documented in [CHANGELOG_OPENADS.md](./CHANGELOG_OPENADS.md).
+
+> [!IMPORTANT]
+> This repository is part of [***OpenADS***](https://github.com/openads-project), the *Open Automated Driving Systems* project. *OpenADS* and its modules have been initiated and are currently being maintained by the [**Institute for Automotive Engineering (ika) at RWTH Aachen University**](https://www.ika.rwth-aachen.de/de/).
+
+> [!TIP]
+> We recommend to use the *carla-simulator* as **simulation backend** in our open, modular and scalable simulation framework <a href="https://github.com/openads-project/openadsim">**OpenADSim**.
+
+---
+---
+## Original README
 [![Documentation](https://readthedocs.org/projects/carla/badge/?version=latest)](https://carla-ue5.readthedocs.io)
 
 [![carla.org](Docs/img/btn/web.png)](http://carla.org)

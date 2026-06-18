@@ -1017,6 +1017,13 @@ void UActorBlueprintFunctionLibrary::MakeIMUDefinition(
   BiasGyroZ.RecommendedValues = {TEXT("0.0")};
   BiasGyroZ.bRestrictToRecommended = false;
 
+  // - Ignore actor pitch and roll ----------------
+  FActorVariation IgnoreTilt;
+  IgnoreTilt.Id = TEXT("ignore_tilt");
+  IgnoreTilt.Type = EActorAttributeType::Bool;
+  IgnoreTilt.RecommendedValues = {TEXT("False")};
+  IgnoreTilt.bRestrictToRecommended = false;
+
   Definition.Variations.Append({NoiseSeed,
                                 StdDevAccelX,
                                 StdDevAccelY,
@@ -1026,7 +1033,8 @@ void UActorBlueprintFunctionLibrary::MakeIMUDefinition(
                                 StdDevGyroZ,
                                 BiasGyroX,
                                 BiasGyroY,
-                                BiasGyroZ});
+                                BiasGyroZ,
+                                IgnoreTilt});
 
   Success = CheckActorDefinition(Definition);
 }
@@ -2112,6 +2120,9 @@ void UActorBlueprintFunctionLibrary::SetIMU(
   IMU->SetGyroscopeBias({RetrieveActorAttributeToFloat("noise_gyro_bias_x", Description.Variations, 0.0f),
                          RetrieveActorAttributeToFloat("noise_gyro_bias_y", Description.Variations, 0.0f),
                          RetrieveActorAttributeToFloat("noise_gyro_bias_z", Description.Variations, 0.0f)});
+
+  IMU->SetIgnoreTilt(
+      RetrieveActorAttributeToBool("ignore_tilt", Description.Variations, false));
 }
 
 void UActorBlueprintFunctionLibrary::SetRadar(

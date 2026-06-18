@@ -1,0 +1,502 @@
+name: Build CARLA on Ubuntu
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+   
+concurrency:
+  group: push-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: read
+  packages: write
+
+
+env:
+  UBUNTU_DISTRO: "22.04"
+  CARLA_CI_UID: ""
+  CARLA_CI_GID: ""
+  DOCKER_IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
+  CONTENT_OVERLAY: "true"
+  CONTENT_OVERLAY_REPOSITORY: "https://gitlab.ika.rwth-aachen.de/fb-fi/simulation/carla/carla-content"
+  CONTENT_OVERLAY_BRANCH: "ue5"
+  UE5_BRANCH: "ue5-dev-carla"
+
+
+jobs:
+  prepare-runner:
+    name: Prepare runner
+    runs-on: self-hosted:ubuntu-gpu
+    outputs:
+      runner-uid: ${{ steps.runner.outputs.runner-uid }}
+      runner-gid: ${{ steps.runner.outputs.runner-gid }}
+      ci-dir: ${{ steps.runner.outputs.ci-dir }}
+      artifacts-dir: ${{ steps.runner.outputs.artifacts-dir }}
+    steps:
+      - name: Detect runner identity and paths
+        id: runner
+        run: |
+          runner_uid="${CARLA_CI_UID:-$(id -u)}"
+          runner_gid="${CARLA_CI_GID:-$(id -g)}"
+          ci_dir="${RUNNER_WORKSPACE}/carla-ci/${GITHUB_RUN_ID}"
+          artifacts_dir="${GITHUB_WORKSPACE}/artifacts"
+
+          echo "runner-uid=${runner_uid}" >> "$GITHUB_OUTPUT"
+          echo "runner-gid=${runner_gid}" >> "$GITHUB_OUTPUT"
+          echo "ci-dir=${ci_dir}" >> "$GITHUB_OUTPUT"
+          echo "artifacts-dir=${artifacts_dir}" >> "$GITHUB_OUTPUT"
+
+      - name: Clean runner workspace
+        run: |
+          case "$GITHUB_WORKSPACE" in
+            "$RUNNER_WORKSPACE"/*) mkdir -p "$GITHUB_WORKSPACE"; find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + ;;
+            *) echo "Refusing to clean unsafe GITHUB_WORKSPACE: $GITHUB_WORKSPACE"; exit 1 ;;
+          esac
+
+          ci_dir="${RUNNER_WORKSPACE}/carla-ci/${GITHUB_RUN_ID}"
+          case "$ci_dir" in
+            "$RUNNER_WORKSPACE"/carla-ci/*) rm -rf "$ci_dir" ;;
+            *) echo "Refusing to clean unsafe CI directory: $ci_dir"; exit 1 ;;
+          esac
+
+          mkdir -p "$ci_dir"
+
+      - name: Verify persistent Unreal Engine directory
+        run: |
+          runner_uid="${{ steps.runner.outputs.runner-uid }}"
+          runner_gid="${{ steps.runner.outputs.runner-gid }}"
+
+          if [ ! -d /work/carla/unreal-engine ]; then
+            echo "Missing host mount directory: /work/carla/unreal-engine"
+            echo "Run this once on the self-hosted runner:"
+            echo "  sudo install -d -o ${runner_uid} -g ${runner_gid} -m 775 /work/carla/unreal-engine"
+            exit 1
+          fi
+
+          if [ ! -w /work/carla/unreal-engine ]; then
+            echo "Unreal Engine directory is not writable for CI user ${runner_uid}:${runner_gid}: /work/carla/unreal-engine"
+            echo "Make /work/carla/unreal-engine writable for the self-hosted runner user."
+            exit 1
+          fi
+
+  build-builder-image:
+    name: Build Builder Image
+    needs: prepare-runner
+    runs-on: self-hosted:ubuntu-gpu
+    outputs:
+      builder-image-id: ${{ steps.publish_builder_image.outputs.builder-image-id }}
+    env:
+      CARLA_DOCKER_IMAGE: carla-development:ue5-22.04
+      CARLA_DOCKER_UID: ${{ needs.prepare-runner.outputs.runner-uid }}
+      CARLA_DOCKER_GID: ${{ needs.prepare-runner.outputs.runner-gid }}
+      CARLA_DOCKER_GROUP_GID: "999"
+      DOCKER_CONFIG: ${{ needs.prepare-runner.outputs.ci-dir }}/docker-config
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build CARLA development image
+        run: |
+          DOCKER_GROUP_GID="$(getent group docker | cut -d: -f3 || true)"
+          if [ -z "$DOCKER_GROUP_GID" ]; then
+            DOCKER_GROUP_GID="$CARLA_DOCKER_GROUP_GID"
+          fi
+
+          bash Util/Docker/build.sh \
+            --ubuntu-distro "$UBUNTU_DISTRO" \
+            --user "${CARLA_DOCKER_UID}:${CARLA_DOCKER_GID}" \
+            --docker-gid "$DOCKER_GROUP_GID"
+
+      - name: Configure Docker auth for GHCR
+        run: |
+          rm -rf "$DOCKER_CONFIG"
+          mkdir -p "$DOCKER_CONFIG"
+
+          auth="$(printf '%s:%s' '${{ github.actor }}' '${{ github.token }}' | base64 | tr -d '\n')"
+
+          cat > "$DOCKER_CONFIG/config.json" <<EOF
+          {
+            "auths": {
+              "ghcr.io": {
+                "auth": "$auth"
+              }
+            }
+          }
+          EOF
+
+      - name: Publish builder image
+        id: publish_builder_image
+        run: |
+          builder_image="${DOCKER_IMAGE_REPOSITORY}:builder"
+          docker tag "$CARLA_DOCKER_IMAGE" "$builder_image"
+          docker push "$builder_image"
+          echo "builder-image-id=$(docker image inspect --format '{{.Id}}' "$CARLA_DOCKER_IMAGE")" >> "$GITHUB_OUTPUT"
+
+      - name: Cleanup Docker auth
+        if: always()
+        run: |
+          rm -rf "$DOCKER_CONFIG"
+
+  build-unreal-engine:
+    name: Build Unreal Engine
+    needs:
+      - prepare-runner
+      - build-builder-image
+    defaults:
+      run:
+        shell: bash -leo pipefail {0}
+    runs-on: self-hosted:ubuntu-gpu
+    env:
+      HOME: /home/carla
+      CARLA_UNREAL_ENGINE_PATH: /workspaces/unreal-engine
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+
+    steps:
+
+      - name: Prepare Unreal Engine
+        env:
+          UE_GITHUB_USERNAME: ${{ secrets.UE_GITHUB_USERNAME }}
+          UE_GITHUB_TOKEN: ${{ secrets.UE_GITHUB_TOKEN }}
+        run: |
+          docker run --rm \
+            --gpus all \
+            --user "${{ needs.prepare-runner.outputs.runner-uid }}:${{ needs.prepare-runner.outputs.runner-gid }}" \
+            -e NVIDIA_VISIBLE_DEVICES=all \
+            -e NVIDIA_DRIVER_CAPABILITIES=all \
+            -e HOME=/home/carla \
+            -e CARLA_UNREAL_ENGINE_PATH="$CARLA_UNREAL_ENGINE_PATH" \
+            -e UE5_BRANCH="$UE5_BRANCH" \
+            -e UE_GITHUB_USERNAME="$UE_GITHUB_USERNAME" \
+            -e UE_GITHUB_TOKEN="$UE_GITHUB_TOKEN" \
+            --volume /work/carla/unreal-engine:/workspaces/unreal-engine \
+            "${{ needs.build-builder-image.outputs.builder-image-id }}" \
+            bash -leo pipefail -c '
+          mkdir -p "$HOME"
+          git config --global --add safe.directory "$CARLA_UNREAL_ENGINE_PATH"
+
+          find_unreal_clang_sysroot() {
+            find \
+              "${CARLA_UNREAL_ENGINE_PATH}/Engine/Extras/ThirdPartyNotUE/SDKs/HostLinux/Linux_x64" \
+              -mindepth 2 \
+              -maxdepth 2 \
+              -type d \
+              -name "*unknown-linux-*" \
+              -print \
+              -quit 2>/dev/null
+          }
+
+          if [ -d "${CARLA_UNREAL_ENGINE_PATH}/.git" ]; then
+            git -C "${CARLA_UNREAL_ENGINE_PATH}" fetch origin "${UE5_BRANCH}"
+            git -C "${CARLA_UNREAL_ENGINE_PATH}" checkout "${UE5_BRANCH}"
+            git -C "${CARLA_UNREAL_ENGINE_PATH}" reset --hard "origin/${UE5_BRANCH}"
+          elif [ -f "${CARLA_UNREAL_ENGINE_PATH}/Setup.sh" ]; then
+            echo "Using existing Unreal Engine source tree at ${CARLA_UNREAL_ENGINE_PATH}."
+          elif [ -z "$(find "${CARLA_UNREAL_ENGINE_PATH}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+            if [ -z "${UE_GITHUB_USERNAME:-}" ] || [ -z "${UE_GITHUB_TOKEN:-}" ]; then
+              echo "Missing UE_GITHUB_USERNAME/UE_GITHUB_TOKEN for Unreal Engine clone."
+              exit 1
+            fi
+
+            git clone -b "${UE5_BRANCH}" \
+              "https://${UE_GITHUB_USERNAME}:${UE_GITHUB_TOKEN}@github.com/CarlaUnreal/UnrealEngine.git" \
+              "${CARLA_UNREAL_ENGINE_PATH}"
+          elif [ -z "$(find_unreal_clang_sysroot)" ]; then
+            echo "Unreal Engine exists at ${CARLA_UNREAL_ENGINE_PATH}, but its clang sysroot is missing."
+            echo "Provide a complete UE checkout or make the directory empty so CI can clone and prepare it."
+            exit 1
+          fi
+
+          cd "${CARLA_UNREAL_ENGINE_PATH}"
+
+          if [ -z "$(find_unreal_clang_sysroot)" ]; then
+            ./Setup.sh
+          fi
+
+          ./GenerateProjectFiles.sh
+
+          if [ ! -x Engine/Binaries/Linux/UnrealEditor ]; then
+            make
+          fi
+          '
+
+  build-carla:
+    name: Build CARLA
+    needs:
+      - prepare-runner
+      - build-builder-image
+      - build-unreal-engine
+    defaults:
+      run:
+        shell: bash -leo pipefail {0}
+    runs-on: self-hosted:ubuntu-gpu
+    timeout-minutes: 600
+    env:
+      HOME: /home/carla
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      CARLA_UNREAL_ENGINE_PATH: /workspaces/unreal-engine
+      ARTIFACTS_DIR: ${{ needs.prepare-runner.outputs.artifacts-dir }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build CARLA
+        env:
+          GITLAB_CONTENT_USERNAME: ${{ secrets.GITLAB_CONTENT_USERNAME }}
+          GITLAB_CONTENT_TOKEN: ${{ secrets.GITLAB_CONTENT_TOKEN }}
+          CARLA_CONTENT_REPOSITORY: ${{ env.CONTENT_OVERLAY_REPOSITORY }}
+          CARLA_CONTENT_BRANCH: ${{ env.CONTENT_OVERLAY_BRANCH }}
+        run: |
+          mkdir -p "$ARTIFACTS_DIR"
+
+          docker run --rm \
+            --gpus all \
+            --user "${{ needs.prepare-runner.outputs.runner-uid }}:${{ needs.prepare-runner.outputs.runner-gid }}" \
+            -e NVIDIA_VISIBLE_DEVICES=all \
+            -e NVIDIA_DRIVER_CAPABILITIES=all \
+            -e HOME=/home/carla \
+            -e CARLA_UNREAL_ENGINE_PATH="$CARLA_UNREAL_ENGINE_PATH" \
+            -e CONTENT_OVERLAY="$CONTENT_OVERLAY" \
+            -e GITLAB_CONTENT_USERNAME="$GITLAB_CONTENT_USERNAME" \
+            -e GITLAB_CONTENT_TOKEN="$GITLAB_CONTENT_TOKEN" \
+            -e CARLA_CONTENT_REPOSITORY="$CARLA_CONTENT_REPOSITORY" \
+            -e CARLA_CONTENT_BRANCH="$CARLA_CONTENT_BRANCH" \
+            --volume /work/carla/unreal-engine:/workspaces/unreal-engine \
+            --volume "$GITHUB_WORKSPACE":/workspaces/carla \
+            --volume "$ARTIFACTS_DIR":/carla/artifacts \
+            --workdir /workspaces/carla \
+            "${{ needs.build-builder-image.outputs.builder-image-id }}" \
+            bash -leo pipefail -c '
+          git config --global --add safe.directory /workspaces/carla
+
+          git clone -b ue5-dev --depth 1 --config filter.lfs.required=false https://bitbucket.org/carla-simulator/carla-content.git Unreal/CarlaUnreal/Content/Carla
+
+          if [ "$CONTENT_OVERLAY" = "true" ]; then
+            rm -rf Unreal/CarlaUnreal/content-openads
+            git clone -b "$CARLA_CONTENT_BRANCH" \
+              "https://${GITLAB_CONTENT_USERNAME}:${GITLAB_CONTENT_TOKEN}@${CARLA_CONTENT_REPOSITORY#https://}" \
+              Unreal/CarlaUnreal/content-openads
+            git -C Unreal/CarlaUnreal/content-openads remote set-url origin "$CARLA_CONTENT_REPOSITORY"
+            python3 Util/SetupUtils/MergeContentOverlay.py \
+              --base Unreal/CarlaUnreal/Content/Carla \
+              --overlay Unreal/CarlaUnreal/content-openads/Carla
+          fi
+
+          cmake --preset Release -DENABLE_ROS2=ON -DBUILD_LIBCARLA_TESTS=ON
+          cmake --build Build/Release --target carla-client
+          cmake --build Build/Release --target carla-python-api
+          cmake --build Build/Release --target carla-server
+          cmake --build Build/Release --target libcarla_test_server
+          cmake --build Build/Release --target libcarla_test_client
+
+          rm -rf Build/test-content
+          git clone --depth 1 -b 0.1.4 https://github.com/carla-simulator/opendrive-test-files.git Build/test-content
+
+          ./Build/Release/LibCarla/libcarla_test_server
+          ./Build/Release/LibCarla/libcarla_test_client
+
+          cmake --build Build/Release --target package
+
+          artifact_dir="/carla/artifacts"
+          mkdir -p "$artifact_dir"
+          rm -rf "$artifact_dir/PythonAPI" "$artifact_dir"/Carla*.tar.gz
+          cp -a PythonAPI "$artifact_dir/PythonAPI"
+          mkdir -p "$artifact_dir/PythonAPI/carla"
+          rm -rf "$artifact_dir/PythonAPI/carla/dist"
+          cp -a Build/Release/PythonAPI/dist "$artifact_dir/PythonAPI/carla/dist"
+          cp -a Build/Release/Package/*tar.gz "$artifact_dir/"
+          '
+
+  provide-artifacts:
+    name: Provide artifacts
+    runs-on: self-hosted:ubuntu-gpu
+    needs:
+      - prepare-runner
+      - build-carla
+    permissions:
+      contents: write 
+    env:
+      ARTIFACTS_DIR: ${{ needs.prepare-runner.outputs.artifacts-dir }}
+    steps:
+
+      - name: Create PythonAPI archive
+        if: startsWith(github.ref, 'refs/tags')
+        run: |
+          tar -czvf "${{ env.ARTIFACTS_DIR }}/PythonAPI.tar.gz" -C "${{ env.ARTIFACTS_DIR }}" PythonAPI
+
+      - uses: ncipollo/release-action@v1         
+        name: Create Release
+        if: startsWith(github.ref, 'refs/tags')
+        with:
+          allowUpdates: true
+          tag: ${{ github.ref_name }}
+          commit: ${{ github.sha }}
+          artifacts: ${{env.ARTIFACTS_DIR}}/PythonAPI.tar.gz
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  create-client-image:
+    name: Create client image
+    runs-on: self-hosted:ubuntu-gpu
+    needs:
+      - prepare-runner
+      - provide-artifacts
+    env:
+      IMAGE_TAG_SUFFIX: ""
+      DOCKER_CONFIG: ${{ needs.prepare-runner.outputs.ci-dir }}/docker-config
+    steps:
+      - name: Set image tag
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          ref_name="$(echo "$GITHUB_REF_NAME" | tr / -)"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "IMAGE_TAG_SUFFIX=_${ref_name}" >> "$GITHUB_ENV"
+          elif [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "IMAGE_TAG_SUFFIX=_${ref_name}_ci" >> "$GITHUB_ENV"
+          fi
+
+      - name: Configure Docker auth for GHCR
+        run: |
+          rm -rf "$DOCKER_CONFIG"
+          mkdir -p "$DOCKER_CONFIG"
+
+          auth="$(printf '%s:%s' '${{ github.actor }}' '${{ github.token }}' | base64 | tr -d '\n')"
+
+          cat > "$DOCKER_CONFIG/config.json" <<EOF
+          {
+            "auths": {
+              "ghcr.io": {
+                "auth": "$auth"
+              }
+            }
+          }
+          EOF
+
+      - name: Verify client image context
+        run: |
+          test -d artifacts/PythonAPI
+          test -d artifacts/PythonAPI/carla/dist
+          test -f Util/Docker/client/Client.Dockerfile
+          test -f Util/Docker/client/entrypoint.sh
+
+      - uses: docker/build-push-action@v5
+        name: Build and push image
+        with:
+          context: .
+          file: Util/Docker/client/Client.Dockerfile
+          tags: ${{ env.DOCKER_IMAGE_REPOSITORY }}:client${{ env.IMAGE_TAG_SUFFIX }}
+          push: true
+          build-args: |
+            UBUNTU_DISTRO=${{ env.UBUNTU_DISTRO }}
+
+      - name: Cleanup Docker auth
+        if: always()
+        run: |
+          rm -rf "$DOCKER_CONFIG"
+
+  create-server-image:
+    name: Create server image
+    runs-on: self-hosted:ubuntu-gpu
+    needs:
+      - prepare-runner
+      - create-client-image
+    env:
+      IMAGE_TAG_SUFFIX: ""
+      DOCKER_CONFIG: ${{ needs.prepare-runner.outputs.ci-dir }}/docker-config
+      ARTIFACTS_DIR: ${{ needs.prepare-runner.outputs.artifacts-dir }}
+    steps:
+      - name: Set image tag
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          ref_name="$(echo "$GITHUB_REF_NAME" | tr / -)"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "IMAGE_TAG_SUFFIX=_${ref_name}" >> "$GITHUB_ENV"
+          elif [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "IMAGE_TAG_SUFFIX=_${ref_name}_ci" >> "$GITHUB_ENV"
+          fi
+
+      - name: Configure Docker auth for GHCR
+        run: |
+          rm -rf "$DOCKER_CONFIG"
+          mkdir -p "$DOCKER_CONFIG"
+
+          auth="$(printf '%s:%s' '${{ github.actor }}' '${{ github.token }}' | base64 | tr -d '\n')"
+
+          cat > "$DOCKER_CONFIG/config.json" <<EOF
+          {
+            "auths": {
+              "ghcr.io": {
+                "auth": "$auth"
+              }
+            }
+          }
+          EOF
+
+      - name: Extract artifact
+        id: server_package
+        run: |
+          rm -rf build
+          mkdir -p build
+          tar -xvzf ${{env.ARTIFACTS_DIR}}/Carla*.tar.gz -C build
+
+          package_dir="$(find build -mindepth 1 -maxdepth 2 -type f -name Dockerfile -printf '%h\n' -quit)"
+          if [ -z "$package_dir" ]; then
+            echo "Could not find package Dockerfile after extracting CARLA artifact."
+            find build -maxdepth 3 -type f -name Dockerfile -print
+            exit 1
+          fi
+
+          echo "context=${package_dir}" >> "$GITHUB_OUTPUT"
+          echo "dockerfile=${package_dir}/Dockerfile" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v5
+        name: Build and push
+        with:
+          context: ${{ steps.server_package.outputs.context }}
+          file: ${{ steps.server_package.outputs.dockerfile }}
+          tags: ${{ env.DOCKER_IMAGE_REPOSITORY }}:server${{ env.IMAGE_TAG_SUFFIX }}
+          no-cache: true
+          push: true
+          build-args: |
+            UBUNTU_DISTRO=${{ env.UBUNTU_DISTRO }}
+
+      - name: Cleanup Docker auth
+        if: always()
+        run: |
+          rm -rf "$DOCKER_CONFIG"
+
+  cleanup-runner:
+    name: Cleanup runner
+    runs-on: self-hosted:ubuntu-gpu
+    needs:
+      - prepare-runner
+      - create-server-image
+    if: always()
+    steps:
+      - name: Clean runner workspace
+        run: |
+          ci_dir="${{ needs.prepare-runner.outputs.ci-dir }}"
+          if [ -n "$ci_dir" ]; then
+            case "$ci_dir" in
+              "$RUNNER_WORKSPACE"/carla-ci/*) rm -rf "$ci_dir" ;;
+              *) echo "Refusing to clean unsafe CI directory: $ci_dir"; exit 1 ;;
+            esac
+          fi
+
+          case "$GITHUB_WORKSPACE" in
+            "$RUNNER_WORKSPACE"/*) mkdir -p "$GITHUB_WORKSPACE"; find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + ;;
+            *) echo "Refusing to clean unsafe GITHUB_WORKSPACE: $GITHUB_WORKSPACE"; exit 1 ;;
+          esac

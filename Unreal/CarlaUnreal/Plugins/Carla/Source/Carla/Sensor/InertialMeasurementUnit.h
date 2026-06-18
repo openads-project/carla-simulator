@@ -57,6 +57,8 @@ public:
 
   void SetGyroscopeBias(const FVector &Vec);
 
+  void SetIgnoreTilt(bool IgnoreTilt);
+
   const FVector &GetAccelerationStandardDeviation() const;
 
   const FVector &GetGyroscopeStandardDeviation() const;
@@ -84,6 +86,9 @@ private:
 
   /// Bias for gyroscope settings.
   FVector BiasGyro;
+
+  /// Whether pitch and roll of the parent actor are excluded from the sensor frame.
+  bool bIgnoreTilt = false;
 
   /// Used to compute the acceleration
   std::array<FVector, 2> PrevLocation;
