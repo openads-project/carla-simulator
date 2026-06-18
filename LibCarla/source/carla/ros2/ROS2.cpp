@@ -433,21 +433,6 @@ std::string ParentFrameOrCarlaMap(const std::string &parent_chain) {
   return parent_chain.empty() ? std::string{"carla_map"} : parent_chain;
 }
 
-std::string ActorTfFrameId(const std::string &frame_id) {
-  constexpr char kTfSuffix[] = "_tf";
-  if (frame_id.empty()) {
-    return std::string{};
-  }
-  if (frame_id.size() >= sizeof(kTfSuffix) - 1
-      && frame_id.compare(
-          frame_id.size() - (sizeof(kTfSuffix) - 1),
-          sizeof(kTfSuffix) - 1,
-          kTfSuffix) == 0) {
-    return frame_id;
-  }
-  return frame_id + kTfSuffix;
-}
-
 }  // namespace
 
 void ROS2::ProcessDataFromCamera(
@@ -635,7 +620,7 @@ void ROS2::ProcessDataFromTF(
         .first;
   }
 
-  const std::string child_frame_id = ActorTfFrameId(LookupFrameId(actor));
+  const std::string child_frame_id = LookupFrameId(actor);
   if (child_frame_id.empty()) {
     return;
   }
