@@ -308,6 +308,7 @@ jobs:
           ./Build/Release/LibCarla/libcarla_test_client
 
           cmake --build Build/Release --target package
+          cmake --build Build/Release --target package-slim
 
           artifact_dir="/carla/artifacts"
           mkdir -p "$artifact_dir"
@@ -450,7 +451,13 @@ jobs:
         run: |
           rm -rf build
           mkdir -p build
-          tar -xvzf ${{env.ARTIFACTS_DIR}}/Carla*.tar.gz -C build
+          package_archive="$(find "${{ env.ARTIFACTS_DIR }}" -maxdepth 1 -type f -name 'Carla-*-Linux-Shipping.tar.gz' -print -quit)"
+          if [ -z "$package_archive" ]; then
+            echo "Could not find the full CARLA server package."
+            find "${{ env.ARTIFACTS_DIR }}" -maxdepth 1 -type f -name 'Carla*.tar.gz' -print
+            exit 1
+          fi
+          tar -xvzf "$package_archive" -C build
 
           package_dir="$(find build -mindepth 1 -maxdepth 2 -type f -name Dockerfile -printf '%h\n' -quit)"
           if [ -z "$package_dir" ]; then
@@ -478,12 +485,90 @@ jobs:
         run: |
           rm -rf "$DOCKER_CONFIG"
 
+  create-slim-server-image:
+    name: Create slim server image
+    runs-on: self-hosted:ubuntu-gpu
+    needs:
+      - prepare-runner
+      - create-server-image
+    env:
+      IMAGE_TAG_SUFFIX: ""
+      DOCKER_CONFIG: ${{ needs.prepare-runner.outputs.ci-dir }}/docker-config
+      ARTIFACTS_DIR: ${{ needs.prepare-runner.outputs.artifacts-dir }}
+    steps:
+      - name: Set image tag
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          ref_name="$(echo "$GITHUB_REF_NAME" | tr / -)"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "IMAGE_TAG_SUFFIX=_${ref_name}" >> "$GITHUB_ENV"
+          elif [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "IMAGE_TAG_SUFFIX=_${ref_name}_ci" >> "$GITHUB_ENV"
+          fi
+
+      - name: Configure Docker auth for GHCR
+        run: |
+          rm -rf "$DOCKER_CONFIG"
+          mkdir -p "$DOCKER_CONFIG"
+
+          auth="$(printf '%s:%s' '${{ github.actor }}' '${{ github.token }}' | base64 | tr -d '\n')"
+
+          cat > "$DOCKER_CONFIG/config.json" <<EOF
+          {
+            "auths": {
+              "ghcr.io": {
+                "auth": "$auth"
+              }
+            }
+          }
+          EOF
+
+      - name: Extract slim artifact
+        id: slim_server_package
+        run: |
+          rm -rf build
+          mkdir -p build
+          package_archive="$(find "$ARTIFACTS_DIR" -maxdepth 1 -type f -name 'Carla-*-Linux-Shipping-Slim.tar.gz' -print -quit)"
+          if [ -z "$package_archive" ]; then
+            echo "Could not find the slim CARLA server package."
+            find "$ARTIFACTS_DIR" -maxdepth 1 -type f -name 'Carla*.tar.gz' -print
+            exit 1
+          fi
+          tar -xvzf "$package_archive" -C build
+
+          package_dir="$(find build -mindepth 1 -maxdepth 2 -type f -name Dockerfile -printf '%h\n' -quit)"
+          if [ -z "$package_dir" ]; then
+            echo "Could not find package Dockerfile after extracting slim CARLA artifact."
+            find build -maxdepth 3 -type f -name Dockerfile -print
+            exit 1
+          fi
+
+          echo "context=${package_dir}" >> "$GITHUB_OUTPUT"
+          echo "dockerfile=${package_dir}/Dockerfile" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v5
+        name: Build and push
+        with:
+          context: ${{ steps.slim_server_package.outputs.context }}
+          file: ${{ steps.slim_server_package.outputs.dockerfile }}
+          tags: ${{ env.DOCKER_IMAGE_REPOSITORY }}:server-slim${{ env.IMAGE_TAG_SUFFIX }}
+          no-cache: true
+          push: true
+          build-args: |
+            UBUNTU_DISTRO=${{ env.UBUNTU_DISTRO }}
+
+      - name: Cleanup Docker auth
+        if: always()
+        run: |
+          rm -rf "$DOCKER_CONFIG"
+
   cleanup-runner:
     name: Cleanup runner
     runs-on: self-hosted:ubuntu-gpu
     needs:
       - prepare-runner
-      - create-server-image
+      - create-slim-server-image
     if: always()
     steps:
       - name: Clean runner workspace
