@@ -381,14 +381,24 @@ function (
   UE_BUILD_CONFIGURATION)
 
   set (PACKAGE_VARIANT)
-  set (CUSTOM_CONFIG)
+  set (DEFAULT_GAME_CONFIG)
+  set (COOK_MAPS)
+  set (CLEAN_COOK FALSE)
 
   if (ARGC GREATER 2)
     set (PACKAGE_VARIANT ${ARGV2})
   endif ()
 
   if (ARGC GREATER 3)
-    set (CUSTOM_CONFIG ${ARGV3})
+    set (DEFAULT_GAME_CONFIG ${ARGV3})
+  endif ()
+
+  if (ARGC GREATER 4)
+    set (COOK_MAPS ${ARGV4})
+  endif ()
+
+  if (ARGC GREATER 5)
+    set (CLEAN_COOK ${ARGV5})
   endif ()
 
   set (
@@ -427,19 +437,32 @@ function (
     set (PACKAGE_CONFIGURATION "default (shipping)")
   endif ()
 
-  set (CUSTOM_CONFIG_ARGUMENT)
+  set (COOKER_CONFIG_ARGUMENT)
+  set (COOK_MAP_ARGUMENT)
   set (COOK_MODE_ARGUMENT -iterate)
   set (PACKAGE_PRE_BUILD_COMMANDS)
 
-  if (NOT "${CUSTOM_CONFIG}" STREQUAL "")
-    set (CUSTOM_CONFIG_ARGUMENT -CustomConfig=${CUSTOM_CONFIG})
-    # A slim cook must not reuse cooked content from the full package.
+  if (COOK_MAPS)
+    list (JOIN COOK_MAPS "+" COOK_MAPS_ARGUMENT)
+    set (COOK_MAP_ARGUMENT -map=${COOK_MAPS_ARGUMENT})
+  endif ()
+
+  if (NOT "${DEFAULT_GAME_CONFIG}" STREQUAL "")
+    set (
+      COOKER_CONFIG_ARGUMENT
+      -AdditionalCookerOptions=-DefGameIni=${DEFAULT_GAME_CONFIG}
+    )
+  endif ()
+
+  if (CLEAN_COOK)
+    # Release variants must not reuse cooked content from another package.
     set (COOK_MODE_ARGUMENT -clean)
     set (
       PACKAGE_PRE_BUILD_COMMANDS
       COMMAND ${CMAKE_COMMAND} -E rm -rf
         ${CARLA_PACKAGE_STAGING_PATH}
         ${CARLA_PACKAGE_ARCHIVE_PATH}
+        ${CARLA_UE_PATH}/Saved/Cooked
     )
   endif ()
 
@@ -458,7 +481,6 @@ function (
       -project=${CARLA_UE_PROJECT_PATH}
       -game
       -buildscw
-      ${CUSTOM_CONFIG_ARGUMENT}
     COMMAND
       ${CARLA_UE_UAT_COMMAND_PREFIX}
       BuildCookRun
@@ -477,7 +499,8 @@ function (
       -build
       -stagingdirectory=${CARLA_PACKAGE_STAGING_PATH}
       -archivedirectory=${CARLA_PACKAGE_ARCHIVE_PATH}
-      ${CUSTOM_CONFIG_ARGUMENT}
+      ${COOKER_CONFIG_ARGUMENT}
+      ${COOK_MAP_ARGUMENT}
     USES_TERMINAL
     VERBATIM
   )
@@ -555,13 +578,23 @@ endfunction()
 # Docs for UE5 build configurations:
 # https://docs.unrealengine.com/4.27/en-US/ProductionPipelines/DevelopmentSetup/BuildConfigurations/
 
-add_carla_ue_package_target("" ${CARLA_UNREAL_PACKAGE_BUILD_TYPE})
+add_carla_ue_package_target("" ${CARLA_UNREAL_PACKAGE_BUILD_TYPE} "" "" "" TRUE)
 add_carla_ue_package_target(Shipping Shipping)
 add_carla_ue_package_target(Debug Debug)
 add_carla_ue_package_target(DebugGame DebugGame)
 add_carla_ue_package_target(Development Development)
 add_carla_ue_package_target(Test Test)
-add_carla_ue_package_target(Slim Shipping Slim Slim)
+set (
+  CARLA_SLIM_MAPS
+  /Game/Carla/Maps/Town10HD_Opt
+  /Game/Carla/Maps/Mine_01
+  /Game/Carla/Maps/Town15/Town15
+  /Game/Carla/Maps/aldenhoven/aldenhoven
+  /Game/Carla/Maps/campus/campus
+  /Game/Carla/Maps/test-track/test-track
+)
+add_carla_ue_package_target(
+  Slim Shipping Slim DefaultGameSlim.ini "${CARLA_SLIM_MAPS}" TRUE)
 
 
 
