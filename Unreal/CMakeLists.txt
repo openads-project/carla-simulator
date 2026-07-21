@@ -381,7 +381,7 @@ function (
   UE_BUILD_CONFIGURATION)
 
   set (PACKAGE_VARIANT)
-  set (DEFAULT_GAME_CONFIG)
+  set (CUSTOM_CONFIG)
   set (COOK_MAPS)
   set (CLEAN_COOK FALSE)
 
@@ -390,7 +390,7 @@ function (
   endif ()
 
   if (ARGC GREATER 3)
-    set (DEFAULT_GAME_CONFIG ${ARGV3})
+    set (CUSTOM_CONFIG ${ARGV3})
   endif ()
 
   if (ARGC GREATER 4)
@@ -437,7 +437,7 @@ function (
     set (PACKAGE_CONFIGURATION "default (shipping)")
   endif ()
 
-  set (COOKER_CONFIG_ARGUMENT)
+  set (CUSTOM_CONFIG_ARGUMENT)
   set (COOK_MAP_ARGUMENT)
   set (COOK_MODE_ARGUMENT -iterate)
   set (PACKAGE_PRE_BUILD_COMMANDS)
@@ -447,11 +447,8 @@ function (
     set (COOK_MAP_ARGUMENT -map=${COOK_MAPS_ARGUMENT})
   endif ()
 
-  if (NOT "${DEFAULT_GAME_CONFIG}" STREQUAL "")
-    set (
-      COOKER_CONFIG_ARGUMENT
-      -AdditionalCookerOptions=-DefGameIni=${DEFAULT_GAME_CONFIG}
-    )
+  if (NOT "${CUSTOM_CONFIG}" STREQUAL "")
+    set (CUSTOM_CONFIG_ARGUMENT -CustomConfig=${CUSTOM_CONFIG})
   endif ()
 
   if (CLEAN_COOK)
@@ -481,6 +478,7 @@ function (
       -project=${CARLA_UE_PROJECT_PATH}
       -game
       -buildscw
+      ${CUSTOM_CONFIG_ARGUMENT}
     COMMAND
       ${CARLA_UE_UAT_COMMAND_PREFIX}
       BuildCookRun
@@ -499,7 +497,7 @@ function (
       -build
       -stagingdirectory=${CARLA_PACKAGE_STAGING_PATH}
       -archivedirectory=${CARLA_PACKAGE_ARCHIVE_PATH}
-      ${COOKER_CONFIG_ARGUMENT}
+      ${CUSTOM_CONFIG_ARGUMENT}
       ${COOK_MAP_ARGUMENT}
     USES_TERMINAL
     VERBATIM
@@ -594,7 +592,7 @@ set (
   /Game/Carla/Maps/test-track/test-track
 )
 add_carla_ue_package_target(
-  Slim Shipping Slim DefaultGameSlim.ini "${CARLA_SLIM_MAPS}" TRUE)
+  Slim Shipping Slim Slim "${CARLA_SLIM_MAPS}" TRUE)
 
 
 
