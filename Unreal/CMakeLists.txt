@@ -585,11 +585,8 @@ add_carla_ue_package_target(Test Test)
 set (
   CARLA_SLIM_MAPS
   /Game/Carla/Maps/Town10HD_Opt
-  /Game/Carla/Maps/Mine_01
-  /Game/Carla/Maps/Town15/Town15
   /Game/Carla/Maps/aldenhoven/aldenhoven
   /Game/Carla/Maps/campus/campus
-  /Game/Carla/Maps/test-track/test-track
 )
 add_carla_ue_package_target(
   Slim Shipping Slim Slim "${CARLA_SLIM_MAPS}" TRUE)
