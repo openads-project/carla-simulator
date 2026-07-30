@@ -14,6 +14,7 @@ variables:
   CARLA_CONTENT_BRANCH: "ue5"
   carla_version: "0.10.0"
   image_carla_release: "$CI_REGISTRY_IMAGE/carla-$carla_version:release"
+  image_carla_release_slim: "$CI_REGISTRY_IMAGE/carla-$carla_version:release-slim"
   image_carla_client: "$CI_REGISTRY_IMAGE/carla-$carla_version:client"
   image_publish_postfix: ci
   CARLA_SRC_VOLUME: "carla-src-${CI_COMMIT_REF_SLUG}-${CI_PIPELINE_ID}"
@@ -198,13 +199,15 @@ build-carla:
       #./Build/Release/LibCarla/libcarla_test_client
 
       cmake --build Build/Release --target package
+      cmake --build Build/Release --target package-slim
       EOF
 
       PACKAGE_FILE="Carla-${carla_version}-Linux-Shipping.tar.gz"
+      SLIM_PACKAGE_FILE="Carla-${carla_version}-Linux-Shipping-Slim.tar.gz"
 
       docker run --rm \
         --volume "$CARLA_SRC_VOLUME:/workspaces/carla:ro" \
-        alpine sh -c "ls -lh /workspaces/carla/Build/Release/Package && test -f /workspaces/carla/Build/Release/Package/$PACKAGE_FILE"
+        alpine sh -c "ls -lh /workspaces/carla/Build/Release/Package && test -f /workspaces/carla/Build/Release/Package/$PACKAGE_FILE && test -f /workspaces/carla/Build/Release/Package/$SLIM_PACKAGE_FILE"
   variables:
     log_file: build_log_carla.txt
 
@@ -256,7 +259,7 @@ build-client-docker-image:
     expire_in: never
 
 
-build-release-docker-image:
+.build-release-docker-image:
   stage: Build Release Docker Image
   extends: .build
   needs:
@@ -265,10 +268,11 @@ build-release-docker-image:
   script:
     - |
       set -e
-      rm -rf docker-release-context
-      mkdir docker-release-context
+      rm -rf "$DOCKER_BUILD_CONTEXT"
+      mkdir "$DOCKER_BUILD_CONTEXT"
 
-      PACKAGE_FILE="Carla-${carla_version}-Linux-Shipping.tar.gz"
+      PACKAGE_BASENAME="Carla-${carla_version}-Linux-Shipping${PACKAGE_SUFFIX}"
+      PACKAGE_FILE="${PACKAGE_BASENAME}.tar.gz"
       PACKAGE_COPY_CONTAINER="carla-release-package-copy-${CI_JOB_ID}"
       docker rm -f "$PACKAGE_COPY_CONTAINER" >/dev/null 2>&1 || true
       docker run -d \
@@ -280,7 +284,7 @@ build-release-docker-image:
       if ! docker cp \
         "$PACKAGE_COPY_CONTAINER:/workspaces/carla/Build/Release/Package/$PACKAGE_FILE" \
         "$PACKAGE_FILE"; then
-        echo "No Linux package found in CARLA source volume at /workspaces/carla/Build/Release/Package/$PACKAGE_FILE." >&2
+        echo "No $PACKAGE_DESCRIPTION Linux package found in CARLA source volume at /workspaces/carla/Build/Release/Package/$PACKAGE_FILE." >&2
         docker exec "$PACKAGE_COPY_CONTAINER" sh -c 'ls -lh /workspaces/carla/Build/Release/Package || true'
         exit 1
       fi
@@ -288,23 +292,39 @@ build-release-docker-image:
       docker rm -f "$PACKAGE_COPY_CONTAINER" >/dev/null
       trap - EXIT
 
-      tar -xzf "$PACKAGE_FILE" -C docker-release-context
+      tar -xzf "$PACKAGE_FILE" -C "$DOCKER_BUILD_CONTEXT"
 
-      PACKAGE_ROOT="docker-release-context/Carla-${carla_version}-Linux-Shipping"
+      PACKAGE_ROOT="${DOCKER_BUILD_CONTEXT}/${PACKAGE_BASENAME}"
       if [ ! -f "$PACKAGE_ROOT/Dockerfile" ]; then
         echo "Expected Dockerfile not found at $PACKAGE_ROOT/Dockerfile." >&2
-        find docker-release-context -maxdepth 3 -type f -name Dockerfile -print || true
+        find "$DOCKER_BUILD_CONTEXT" -maxdepth 3 -type f -name Dockerfile -print || true
         exit 1
       fi
 
       ls -lh "$PACKAGE_ROOT"
       docker build \
         --build-arg UBUNTU_DISTRO=$UBUNTU_DISTRO \
-        -t ${image_carla_release}_ci_${CI_COMMIT_REF_SLUG} \
+        -t ${RELEASE_IMAGE}_ci_${CI_COMMIT_REF_SLUG} \
         -f "$PACKAGE_ROOT/Dockerfile" \
-        "$PACKAGE_ROOT" > build_log_release_image.txt 2>&1
+        "$PACKAGE_ROOT" > "$log_file" 2>&1
+
+build-release-docker-image:
+  extends: .build-release-docker-image
   variables:
+    PACKAGE_SUFFIX: ""
+    PACKAGE_DESCRIPTION: "full"
+    DOCKER_BUILD_CONTEXT: docker-release-context
+    RELEASE_IMAGE: "$image_carla_release"
     log_file: build_log_release_image.txt
+
+build-slim-release-docker-image:
+  extends: .build-release-docker-image
+  variables:
+    PACKAGE_SUFFIX: "-Slim"
+    PACKAGE_DESCRIPTION: "slim"
+    DOCKER_BUILD_CONTEXT: docker-slim-release-context
+    RELEASE_IMAGE: "$image_carla_release_slim"
+    log_file: build_log_slim_release_image.txt
 
 .push:
   stage: Push Docker Images
@@ -322,12 +342,23 @@ build-release-docker-image:
         export image_publish_postfix=${CI_COMMIT_REF_SLUG}_${CI_COMMIT_SHORT_SHA}
       fi
 
-push-release-docker-image:
+.push-release-docker-image:
   extends: .push
-  needs: ["build-release-docker-image"]
   script:
-    - docker tag ${image_carla_release}_ci_${CI_COMMIT_REF_SLUG} ${image_carla_release}_$image_publish_postfix
-    - docker push ${image_carla_release}_$image_publish_postfix
+    - docker tag ${RELEASE_IMAGE}_ci_${CI_COMMIT_REF_SLUG} ${RELEASE_IMAGE}_$image_publish_postfix
+    - docker push ${RELEASE_IMAGE}_$image_publish_postfix
+
+push-release-docker-image:
+  extends: .push-release-docker-image
+  needs: ["build-release-docker-image"]
+  variables:
+    RELEASE_IMAGE: "$image_carla_release"
+
+push-slim-release-docker-image:
+  extends: .push-release-docker-image
+  needs: ["build-slim-release-docker-image"]
+  variables:
+    RELEASE_IMAGE: "$image_carla_release_slim"
 
 push-client-docker-image:
   extends: .push
@@ -345,5 +376,7 @@ clean-up:
   when: on_success
   script:
     - docker rmi ${image_carla_release}_ci_${CI_COMMIT_REF_SLUG} || echo "Image ${image_carla_release}_ci_${CI_COMMIT_REF_SLUG} does not exist."
+    - docker rmi ${image_carla_release_slim}_ci_${CI_COMMIT_REF_SLUG} || echo "Image ${image_carla_release_slim}_ci_${CI_COMMIT_REF_SLUG} does not exist."
     - docker volume rm "$CARLA_SRC_VOLUME" || echo "Volume $CARLA_SRC_VOLUME does not exist."
     - rm -rf docker-release-context
+    - rm -rf docker-slim-release-context

@@ -2,6 +2,8 @@
 
 - Added GitLab and GitHub CI pipelines for UE5 CARLA builds, including builder image creation, Unreal Engine setup, CARLA package build, release/client Docker image builds, image publishing, and cleanup.
 - Integrated additional OpenADS content repository via temporary `Unreal/CarlaUnreal/content-openads` and configured additional maps and vehicles for cooking and packaging.
+- Added full and slim CARLA release images; the slim variant cooks only `Town10HD_Opt`, `aldenhoven`, and `campus`, while both variants use `campus` as the default map.
+- Added infrastructure and road-work-zone props to both release images.
 - Updated Docker packaging and added dedicated CARLA PythonAPI client image.
 - Added Python 3.12 support to the build environment and PythonAPI CMake configuration.
 - Enabled ROS 2 actor control for vehicles using `role_name=ego_vehicle`.
