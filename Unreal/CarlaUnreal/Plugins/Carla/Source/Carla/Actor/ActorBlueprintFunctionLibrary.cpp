@@ -230,6 +230,14 @@ static void FillIdAndTags(FActorDefinition &Def, TStrs &&...Strings)
   Var.RecommendedValues = {Def.Id};
   Var.bRestrictToRecommended = false;
   Def.Variations.Emplace(Var);
+
+  // Opt-out of native ROS2 TF broadcast for this actor.
+  FActorVariation NoTransform;
+  NoTransform.Id = TEXT("no_transform");
+  NoTransform.Type = EActorAttributeType::Bool;
+  NoTransform.RecommendedValues = {TEXT("False")};
+  NoTransform.bRestrictToRecommended = false;
+  Def.Variations.Emplace(NoTransform);
 }
 
 static void AddRecommendedValuesForActorRoleName(

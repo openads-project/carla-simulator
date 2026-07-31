@@ -216,9 +216,15 @@ FCarlaActor* UActorDispatcher::RegisterActor(
       } else {
         ResolvedRosName = RosName;
       }
+      // Actors carrying no_transform=true still publish their data topics, but
+      // ROS2 skips their TF so another node can own the frame.
+      const bool bNoTransform = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool(
+          TEXT("no_transform"),
+          Description.Variations,
+          false);
       if (!ResolvedRosName.empty())
       {
-        ROS2->RegisterSensor(static_cast<void*>(&Actor), ResolvedRosName, ResolvedRosName, true);
+        ROS2->RegisterSensor(static_cast<void*>(&Actor), ResolvedRosName, ResolvedRosName, !bNoTransform);
       }
 
       // vehicle controller for hero. Scan the variations once for the hero role and the
