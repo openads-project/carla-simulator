@@ -30,6 +30,16 @@ If the camera is parented to an actor, for example the ego vehicle, the topic na
 
 See the [ROS2 sensors reference](ros2_native_sensors.md) for details about the message formats used for each sensor type.
 
+## Transforms
+
+By default CARLA also broadcasts a ROS 2 transform for every actor. It publishes: `/tf_static` for actors parented to another actor, `/tf` otherwise. Set the `no_transform` attribute to opt an actor out of this, leaving its frame to be published somewhere else:
+
+```py
+bp.set_attribute('no_transform', 'true')
+```
+
+Sensor data topics are unaffected — only the transform is suppressed. This is useful when the actor's frame in ROS is not meant to follow its absolute pose in the CARLA world, for example when infrastructure sensors are placed relative to the ground rather than at their true altitude.
+
 ## Control data
 
 Controls may be sent to one ego vehicle:
