@@ -11,5 +11,6 @@
 - Added ROS 2 native Odometry and TF sensors publishing `nav_msgs/Odometry` and `tf2_msgs/TFMessage`.
 - Added the `ignore_altitude` and `ignore_tilt` attributes to Odometry and TF sensors, and `ignore_tilt` to the IMU sensor.
 - Updated ROS 2 transform publishing with actor and sensor parent relationships, dynamic transforms on `/tf`, static transforms for attached sensors on `/tf_static`, and `carla_map` as the root frame.
+- Added the `no_transform` attribute to all actor definitions, which makes the ROS 2 native interface skip an actor's transform while it keeps publishing the actor's data, so that another node can own its frame.
 - Corrected the GNSS latitude direction to preserve CARLA's geographic coordinate convention.
 - Increased the maximum pedestrian velocity by applying CARLA's 4096 cm/s walk-speed limit to the UE5 character movement component.

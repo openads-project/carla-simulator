@@ -32,7 +32,7 @@ See the [ROS2 sensors reference](ros2_native_sensors.md) for details about the m
 
 ## Transforms
 
-By default the server also broadcasts a transform for every actor it publishes: `/tf_static` for actors parented to another actor, `/tf` otherwise. Set the `no_transform` attribute to opt an actor out of this, leaving its frame to be published by another node:
+By default CARLA also broadcasts a ROS 2 transform for every actor. It publishes: `/tf_static` for actors parented to another actor, `/tf` otherwise. Set the `no_transform` attribute to opt an actor out of this, leaving its frame to be published somewhere else:
 
 ```py
 bp.set_attribute('no_transform', 'true')

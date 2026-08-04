@@ -231,7 +231,7 @@ static void FillIdAndTags(FActorDefinition &Def, TStrs &&...Strings)
   Var.bRestrictToRecommended = false;
   Def.Variations.Emplace(Var);
 
-  // Opt-out of native ROS2 TF broadcast for this actor.
+  // Opt-out of native ROS 2 TF broadcast for this actor.
   FActorVariation NoTransform;
   NoTransform.Id = TEXT("no_transform");
   NoTransform.Type = EActorAttributeType::Bool;

@@ -217,7 +217,7 @@ FCarlaActor* UActorDispatcher::RegisterActor(
         ResolvedRosName = RosName;
       }
       // Actors carrying no_transform=true still publish their data topics, but
-      // ROS2 skips their TF so another node can own the frame.
+      // ROS 2 skips their TF so another node can own the frame.
       const bool bNoTransform = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool(
           TEXT("no_transform"),
           Description.Variations,
