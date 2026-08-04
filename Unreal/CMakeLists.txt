@@ -585,6 +585,7 @@ add_carla_ue_package_target(Test Test)
 set (
   CARLA_SLIM_MAPS
   /Game/Carla/Maps/Town10HD_Opt
+  /Game/Carla/Maps/OpenDriveMap
   /Game/Carla/Maps/aldenhoven/aldenhoven
   /Game/Carla/Maps/campus/campus
 )
