@@ -222,6 +222,7 @@ private:
   uint64_t _frame{0};
   int32_t _seconds{0};
   uint32_t _nanoseconds{0};
+  double _unix_time_offset{0.0};
 
   std::unordered_map<void *, ActorRegistration> _registrations;
   std::unordered_map<void *, std::vector<void *>> _actor_parents;
