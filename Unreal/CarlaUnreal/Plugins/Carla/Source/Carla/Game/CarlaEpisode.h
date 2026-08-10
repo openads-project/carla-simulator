@@ -105,6 +105,12 @@ public:
     return ElapsedGameTime;
   }
 
+  /// Seed the simulation clock this episode counts up from.
+  void SetElapsedGameTime(double Time)
+  {
+    ElapsedGameTime = Time;
+  }
+
   /// Visual game seconds
   double GetVisualGameTime() const
   {

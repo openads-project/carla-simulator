@@ -31,6 +31,8 @@
 #include "PhysicsEngine/PhysicsSettings.h"
 #include <util/ue-header-guard-end.h>
 
+#include <cstdlib>
+#include <ctime>
 #include <thread>
 
 // =============================================================================
@@ -39,6 +41,32 @@
 
 // init static variables
 uint64_t FCarlaEngine::FrameCounter = 0;
+
+// Unix timestamp every episode's simulation clock starts from, taken from the
+// CARLA_START_TIME environment variable. A negative value means "the Unix time at
+// which this server resolved the variable".
+//
+// Resolved exactly once per process, so every episode of a run shares the same
+// epoch and every consumer of the simulation time -- the native ROS2 interface,
+// the world observer, and each sensor's data stream -- agrees on it without
+// having to be told the offset separately.
+static double FCarlaEngine_GetStartTime()
+{
+  static const double StartTime = []() -> double
+  {
+    const char *Env = std::getenv("CARLA_START_TIME");
+    if (Env == nullptr)
+      return 0.0;
+    const double Value = std::strtod(Env, nullptr);
+    const double Resolved = (Value < 0.0) ? static_cast<double>(std::time(nullptr)) : Value;
+    if (Resolved > 0.0)
+    {
+      UE_LOG(LogCarla, Log, TEXT("Simulation time starts at CARLA_START_TIME: %f"), Resolved);
+    }
+    return Resolved;
+  }();
+  return StartTime;
+}
 
 static uint32 FCarlaEngine_GetNumberOfThreadsForRPCServer()
 {
@@ -260,6 +288,7 @@ void FCarlaEngine::NotifyBeginEpisode(UCarlaEpisode &Episode)
   CurrentEpisode->ApplySettings(CurrentSettings);
 
   ResetFrameCounter(GFrameNumber);
+  CurrentEpisode->SetElapsedGameTime(FCarlaEngine_GetStartTime());
 
   // make connection between Episode and Recorder
   if (Recorder)
