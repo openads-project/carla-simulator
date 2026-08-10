@@ -4,9 +4,6 @@
 // This work is licensed under the terms of the MIT license.
 // For a copy, see <https://opensource.org/licenses/MIT>.
 
-#include <cstdlib>
-#include <ctime>
-
 #include "carla/Logging.h"
 #include "carla/ros2/ROS2.h"
 #include "carla/geom/GeoLocation.h"
@@ -97,15 +94,6 @@ void ROS2::Enable(bool enable) {
   _enabled = enable;
   log_info("ROS2 enabled: ", _enabled);
   _clock_publisher = std::make_shared<CarlaClockPublisher>();
-
-  const char* offset_env = std::getenv("START_UNIX_TIME_STAMP");
-  if (offset_env != nullptr) {
-    const double value = std::strtod(offset_env, nullptr);
-    _unix_time_offset = (value < 0.0) ? static_cast<double>(std::time(nullptr)) : value;
-    if (_unix_time_offset > 0.0) {
-      log_info("ROS2: timestamps offset by START_UNIX_TIME_STAMP: ", _unix_time_offset);
-    }
-  }
 #if defined(WITH_ROS2_DEMO)
   _basic_publisher = std::make_shared<BasicPublisher>("basic_publisher", "");
   _basic_publisher->Init();
@@ -141,7 +129,6 @@ void ROS2::SetFrame(uint64_t frame) {
 }
 
 void ROS2::SetTimestamp(double timestamp) {
-  timestamp += _unix_time_offset;
   double integral;
   const double fractional = std::modf(timestamp, &integral);
   const double multiplier = 1000000000.0;
