@@ -42,17 +42,19 @@ Sensor data topics are unaffected — only the transform is suppressed. This is 
 
 ## Simulation time
 
-An episode's simulation clock starts at zero. Set the `CARLA_START_TIME` environment variable to start it from a given moment instead, so that ROS timestamps read as wall-clock time rather than as seconds since the episode began:
+An episode's simulation clock starts at zero. Pass `-carla-start-time=<unix_timestamp>` to start it from a given moment instead, so that ROS timestamps read as wall-clock time rather than as seconds since the episode began:
 
 ```sh
-CARLA_START_TIME=$(date +%s) ./CarlaUnreal.sh --ros2
+./CarlaUnreal.sh --ros2 -carla-start-time=$(date +%s)
 ```
 
 The value is a **Unix timestamp** — seconds since 1970-01-01 UTC, as printed by `date +%s`. A negative value means "the Unix time at which the server starts", which is convenient for a single server but leaves the epoch unknown to anything that has to agree on it up front.
 
+The same setting can be given as `StartTime` under `[CARLA/Server]` in `CarlaSettings.ini`, or in a file passed with `-carla-settings=`; the command-line option takes precedence over both.
+
 Only the start of the clock is set, not its rate: the simulation time still advances by `fixed_delta_seconds` per frame, so in synchronous mode it drifts away from wall-clock time as soon as the simulation runs faster or slower than real time.
 
-The variable seeds the episode clock itself, not just the ROS 2 output, so `/clock`, every sensor's message header, `carla.Timestamp.elapsed_seconds`, and the timestamp on sensor data received through the Python API all share the same start time. A client reading the simulation time therefore needs no knowledge of it.
+The option seeds the episode clock itself, not just the ROS 2 output, so `/clock`, every sensor's message header, `carla.Timestamp.elapsed_seconds`, and the timestamp on sensor data received through the Python API all share the same start time. A client reading the simulation time therefore needs no knowledge of it.
 
 ## Control data
 

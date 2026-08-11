@@ -103,6 +103,12 @@ public:
   UPROPERTY(Category = "CARLA Server", VisibleAnywhere)
   bool bDisableRendering = false;
 
+  /// Unix timestamp the simulation clock of every episode starts from. Zero
+  /// starts the clock at zero, as CARLA does by default. A negative value means
+  /// "the Unix time at which the server resolves it", sampled once per process
+  /// so that every episode of a run shares one epoch.
+  double StartTime = 0.0;
+
   // ===========================================================================
   /// @name Quality Settings
   // ===========================================================================

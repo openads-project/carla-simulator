@@ -85,6 +85,7 @@ static void LoadSettingsFromConfig(
     ConfigFile.GetString(S_CARLA_SERVER, TEXT("PrimaryIP"), Tmp);
     Settings.PrimaryIP = TCHAR_TO_UTF8(*Tmp);
     ConfigFile.GetInt(S_CARLA_SERVER,    TEXT("PrimaryPort"), Settings.PrimaryPort);
+    ConfigFile.GetDouble(S_CARLA_SERVER, TEXT("StartTime"), Settings.StartTime);
   }
   ConfigFile.GetBool(S_CARLA_SERVER, TEXT("SynchronousMode"), Settings.bSynchronousMode);
   ConfigFile.GetBool(S_CARLA_SERVER, TEXT("DisableRendering"), Settings.bDisableRendering);
@@ -153,6 +154,7 @@ void UCarlaSettings::LoadSettings()
     {
       PrimaryPort = Value;
     }
+    FParse::Value(FCommandLine::Get(), TEXT("-carla-start-time="), StartTime);
     FString StringQualityLevel;
     if (FParse::Value(FCommandLine::Get(), TEXT("-quality-level="), StringQualityLevel))
     {
@@ -191,6 +193,7 @@ void UCarlaSettings::LogSettings() const
   UE_LOG(LogCarla, Log, TEXT("Secondary Port = %d"), SecondaryPort);
   UE_LOG(LogCarla, Log, TEXT("Synchronous Mode = %s"), EnabledDisabled(bSynchronousMode));
   UE_LOG(LogCarla, Log, TEXT("Rendering = %s"), EnabledDisabled(!bDisableRendering));
+  UE_LOG(LogCarla, Log, TEXT("Start Time = %f"), StartTime);
   UE_LOG(LogCarla, Log, TEXT("[%s]"), S_CARLA_QUALITYSETTINGS);
   UE_LOG(LogCarla, Log, TEXT("Quality Level = %s"), *QualityLevelToString(QualityLevel));
   UE_LOG(LogCarla, Log,
