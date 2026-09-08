@@ -50,11 +50,13 @@ An episode's simulation clock starts at zero. Pass `-carla-start-time=<unix_time
 
 The value is a **Unix timestamp** — seconds since 1970-01-01 UTC, as printed by `date +%s`. A negative value means "the Unix time at which the server starts", which is convenient for a single server but leaves the epoch unknown to anything that has to agree on it up front.
 
-The same setting can be given as `StartTime` under `[CARLA/Server]` in `CarlaSettings.ini`, or in a file passed with `-carla-settings=`; the command-line option takes precedence over both.
+The same setting can be given as `StartTime` under `[CARLA/Server]` in `CarlaSettings.ini` < in a file passed with `-carla-settings=` or as a  < command-line option `-carla-start-time=` which takes precedence over both.
+
+The clock is seeded at the beginning of *every* episode, not only the first. E.g., loading or reloading a map therefore restarts it at the configured moment and replays the same range of simulation time, so time steps backwards across the reload, `/clock` included. No `/clock` is published at all while the level transitions. This keeps scenarios exactly reproducible.
 
 Only the start of the clock is set, not its rate: the simulation time still advances by `fixed_delta_seconds` per frame, so in synchronous mode it drifts away from wall-clock time as soon as the simulation runs faster or slower than real time.
 
-The option seeds the episode clock itself, not just the ROS 2 output, so `/clock`, every sensor's message header, `carla.Timestamp.elapsed_seconds`, and the timestamp on sensor data received through the Python API all share the same start time. A client reading the simulation time therefore needs no knowledge of it.
+The option seeds the episode clock itself, not just the ROS 2 output, so `/clock`, every sensor's message header, `carla.Timestamp.elapsed_seconds`, and the timestamp on sensor data received through the Python API all share the same start time.
 
 ## Control data
 
