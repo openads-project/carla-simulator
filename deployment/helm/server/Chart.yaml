@@ -1,5 +1,5 @@
 apiVersion: v2
-name: carla-simulator
+name: carla-server
 version: 0.1.0
 appVersion: "0.10.0-1.1.0"
 description: CARLA simulation backend for OpenADS based on Unreal Engine 5

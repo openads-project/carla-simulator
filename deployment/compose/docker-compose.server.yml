@@ -1,0 +1,21 @@
+services:
+
+  carla-server:
+    image: ghcr.io/openads-project/carla-simulator:server-slim_v0.10.0-1.1.0
+    command: bash -ic './Linux/CarlaUnreal.sh -nosound --ros2'
+    expose:
+      - "2000"
+      - "2001"
+      - "2002"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/2000"]
+      start_period: 30s
+      start_interval: 1s
+      interval: 2s
+      timeout: 1s
+      retries: 3
+
+  carla-server-offscreen:
+    extends:
+      service: carla-server
+    command: bash -ic './Linux/CarlaUnreal.sh -nosound -RenderOffScreen --ros2'
