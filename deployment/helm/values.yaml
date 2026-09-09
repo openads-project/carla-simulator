@@ -1,0 +1,25 @@
+openadservice:
+  name: carla-server
+  image: ghcr.io/openads-project/carla-simulator:server_v0.10.0-1.1.0
+  gpu: true
+  shm: true
+  env:
+    # When changing this port, also update expose below (RPC, RPC + 1, RPC + 2).
+    CARLA_RPC_PORT: 2000
+  args:
+  - /bin/bash
+  - Linux/CarlaUnreal.sh
+  - -RenderOffScreen
+  - --ros2
+  - -carla-rpc-port=$(CARLA_RPC_PORT)
+  enableService: true
+  expose:
+  - port: 2000
+    targetPort: 2000
+    protocol: TCP
+  - port: 2001
+    targetPort: 2001
+    protocol: TCP
+  - port: 2002
+    targetPort: 2002
+    protocol: TCP
