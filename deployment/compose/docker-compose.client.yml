@@ -1,8 +1,5 @@
 services:
 
   carla-client:
-    depends_on:
-      carla-server:
-        condition: service_healthy
     image: ghcr.io/openads-project/carla-simulator:client_v0.10.0-1.1.0
     command: sleep infinity
