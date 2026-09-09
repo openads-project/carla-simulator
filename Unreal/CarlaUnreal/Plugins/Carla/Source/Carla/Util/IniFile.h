@@ -122,6 +122,14 @@ public:
     }
   }
 
+  void GetDouble(const TCHAR* Section, const TCHAR* Key, double &Target, const double Factor = 1.0) const
+  {
+    FString Value;
+    if (ConfigFile.GetString(Section, Key, Value)) {
+      Target = Factor * FCString::Atod(*Value);
+    }
+  }
+
   void GetLinearColor(const TCHAR* Section, const TCHAR* Key, FLinearColor &Target) const
   {
     FString Value;

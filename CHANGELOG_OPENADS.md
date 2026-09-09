@@ -12,5 +12,6 @@
 - Added the `ignore_altitude` and `ignore_tilt` attributes to Odometry and TF sensors, and `ignore_tilt` to the IMU sensor.
 - Updated ROS 2 transform publishing with actor and sensor parent relationships, dynamic transforms on `/tf`, static transforms for attached sensors on `/tf_static`, and `carla_map` as the root frame.
 - Added the `no_transform` attribute to all actor definitions, which makes the ROS 2 native interface skip an actor's transform while it keeps publishing the actor's data, so that another node can own its frame.
+- Added the [`-carla-start-time=<unix_timestamp>`](./Docs/ros2_native.md) server option, also settable as `StartTime` under `[CARLA/Server]` in `CarlaSettings.ini`, which starts an episode's simulation clock at a given Unix timestamp instead of at zero. It seeds the episode clock, so `/clock`, ROS 2 message headers, `carla.Timestamp.elapsed_seconds`, and sensor data timestamps all share the same start time and no client needs to be told it separately.
 - Corrected the GNSS latitude direction to preserve CARLA's geographic coordinate convention.
 - Increased the maximum pedestrian velocity by applying CARLA's 4096 cm/s walk-speed limit to the UE5 character movement component.

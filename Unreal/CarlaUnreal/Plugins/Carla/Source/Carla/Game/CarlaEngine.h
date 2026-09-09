@@ -113,6 +113,10 @@ private:
 
   bool bMapChanged = false;
 
+  /// Unix timestamp every episode's simulation clock starts from, resolved once
+  /// in NotifyInitGame so that all episodes of a run share one epoch.
+  double StartTime = 0.0;
+
   FCarlaServer Server;
 
   FWorldObserver WorldObserver;

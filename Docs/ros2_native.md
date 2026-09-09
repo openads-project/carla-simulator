@@ -40,6 +40,24 @@ bp.set_attribute('no_transform', 'true')
 
 Sensor data topics are unaffected — only the transform is suppressed. This is useful when the actor's frame in ROS is not meant to follow its absolute pose in the CARLA world, for example when infrastructure sensors are placed relative to the ground rather than at their true altitude.
 
+## Simulation time
+
+An episode's simulation clock starts at zero. Pass `-carla-start-time=<unix_timestamp>` to start it from a given moment instead, so that ROS timestamps read as wall-clock time rather than as seconds since the episode began:
+
+```sh
+./CarlaUnreal.sh --ros2 -carla-start-time=$(date +%s)
+```
+
+The value is a **Unix timestamp** — seconds since 1970-01-01 UTC, as printed by `date +%s`. A negative value means "the Unix time at which the server starts", which is convenient for a single server but leaves the epoch unknown to anything that has to agree on it up front.
+
+The same setting can be given as `StartTime` under `[CARLA/Server]` in `CarlaSettings.ini` < in a file passed with `-carla-settings=` or as a  < command-line option `-carla-start-time=` which takes precedence over both.
+
+The clock is seeded at the beginning of *every* episode, not only the first. E.g., loading or reloading a map therefore restarts it at the configured moment and replays the same range of simulation time, so time steps backwards across the reload, `/clock` included. No `/clock` is published at all while the level transitions. This keeps scenarios exactly reproducible.
+
+Only the start of the clock is set, not its rate: the simulation time still advances by `fixed_delta_seconds` per frame, so in synchronous mode it drifts away from wall-clock time as soon as the simulation runs faster or slower than real time.
+
+The option seeds the episode clock itself, not just the ROS 2 output, so `/clock`, every sensor's message header, `carla.Timestamp.elapsed_seconds`, and the timestamp on sensor data received through the Python API all share the same start time.
+
 ## Control data
 
 Controls may be sent to one ego vehicle:
