@@ -1,5 +1,7 @@
 # OpenADS specific changes
 
+- Added independently installable CARLA server and client Helm charts under `deployment/helm`, using the shared OpenADS `openadservice` chart.
+- Added separate Docker Compose service definitions for the CARLA server and client under `deployment/compose`.
 - Added GitLab and GitHub CI pipelines for UE5 CARLA builds, including builder image creation, Unreal Engine setup, CARLA package build, release/client Docker image builds, image publishing, and cleanup.
 - Integrated additional OpenADS content repository via temporary `Unreal/CarlaUnreal/content-openads` and configured additional maps and vehicles for cooking and packaging.
 - Added full and slim CARLA release images; the slim variant cooks only `Town10HD_Opt`, `aldenhoven`, and `campus`, while both variants use `campus` as the default map.

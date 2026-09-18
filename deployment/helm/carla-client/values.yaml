@@ -1,0 +1,20 @@
+openadservice:
+  name: carla-client
+  image: ghcr.io/openads-project/carla-simulator:client_v0.10.0-1.1.1
+  gpu: true
+  shm: false
+  x11Display: ":0"
+  # Override this with the host's Xauthority file when access is not granted via xhost.
+  x11XauthorityFile: /dev/null
+  env:
+    CARLA_HOST: carla-server
+    CARLA_PORT: 2000
+    __NV_PRIME_RENDER_OFFLOAD: 1
+    __GLX_VENDOR_LIBRARY_NAME: nvidia
+  args:
+  - sleep
+  - infinity
+  dependsOn:
+  - host: carla-server
+    port: 2000
+  enableService: false
