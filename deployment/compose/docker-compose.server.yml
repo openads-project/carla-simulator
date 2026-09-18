@@ -2,7 +2,16 @@ services:
 
   carla-server:
     image: ghcr.io/openads-project/carla-simulator:server-slim_v0.10.0-1.1.0
-    command: bash -ic './Linux/CarlaUnreal.sh -nosound --ros2'
+    environment:
+      CARLA_PORT: 2000
+    command:
+      - /bin/bash
+      - -ic
+      - |
+        ./Linux/CarlaUnreal.sh \
+          -nosound \
+          --ros2 \
+          -carla-rpc-port=$${CARLA_PORT}
     expose:
       - "2000"
       - "2001"
@@ -18,4 +27,12 @@ services:
   carla-server-offscreen:
     extends:
       service: carla-server
-    command: bash -ic './Linux/CarlaUnreal.sh -nosound -RenderOffScreen --ros2'
+    command:
+      - /bin/bash
+      - -ic
+      - |
+        ./Linux/CarlaUnreal.sh \
+          -nosound \
+          -RenderOffScreen \
+          --ros2 \
+          -carla-rpc-port=$${CARLA_PORT}
