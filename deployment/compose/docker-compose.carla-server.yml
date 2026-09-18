@@ -1,7 +1,7 @@
 services:
 
   carla-server:
-    image: ghcr.io/openads-project/carla-simulator:server-slim_v0.10.0-1.1.0
+    image: ghcr.io/openads-project/carla-simulator:server-slim_v0.10.0-1.1.1
     environment:
       CARLA_PORT: 2000
     command:
