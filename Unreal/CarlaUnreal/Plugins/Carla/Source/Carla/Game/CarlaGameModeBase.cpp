@@ -13,6 +13,7 @@
 #include "Carla/Lights/CarlaLight.h"
 #include "Carla/Vehicle/VehicleSpawnPoint.h"
 #include "Carla/Util/BoundingBoxCalculator.h"
+#include "Carla/Weather/Sky.h"
 
 #include <util/disable-ue4-macros.h>
 #include "carla/opendrive/OpenDriveParser.h"
@@ -74,6 +75,45 @@ const FString ACarlaGameModeBase::GetFullMapPath() const
   return FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir()) + Path;
 }
 
+void ACarlaGameModeBase::InitializeOpenDriveSky(const FString &MapName)
+{
+  if (!MapName.Contains(TEXT("OpenDriveMap")))
+  {
+    return;
+  }
+
+  UWorld* World = GetWorld();
+  check(World != nullptr);
+
+  if (UGameplayStatics::GetActorOfClass(World, ASkyBase::StaticClass()) != nullptr)
+  {
+    UE_LOG(LogCarla, Log, TEXT("Using existing OpenDRIVE sky actor."));
+    return;
+  }
+
+  if (OpenDriveSkyClass == nullptr)
+  {
+    OpenDriveSkyClass = LoadClass<ASkyBase>(
+        nullptr,
+        TEXT("/Game/Carla/Blueprints/LevelDesign/BP_Carla_Sky.BP_Carla_Sky_C"));
+  }
+
+  if (OpenDriveSkyClass == nullptr)
+  {
+    UE_LOG(LogCarla, Error, TEXT("Missing OpenDRIVE sky class!"));
+    return;
+  }
+
+  ASkyBase* SkyActor = World->SpawnActor<ASkyBase>(OpenDriveSkyClass);
+  if (SkyActor == nullptr)
+  {
+    UE_LOG(LogCarla, Error, TEXT("Failed to spawn the OpenDRIVE sky actor!"));
+    return;
+  }
+
+  UE_LOG(LogCarla, Log, TEXT("Spawned OpenDRIVE sky actor %s"), *SkyActor->GetName());
+}
+
 void ACarlaGameModeBase::InitGame(
     const FString &MapName,
     const FString &Options,
@@ -133,6 +173,11 @@ void ACarlaGameModeBase::InitGame(
   } else {
     UE_LOG(LogCarla, Error, TEXT("Missing CarlaSettingsDelegate!"));
   }
+
+  // OpenDriveMap is a minimal base level and does not contain CARLA's UE5 sky
+  // actor. Spawn it before the weather actor so weather updates can control
+  // the sun, skylight, atmosphere, clouds, and fog in generated XODR worlds.
+  InitializeOpenDriveSky(InMapName);
 
   AActor* WeatherActor =
       UGameplayStatics::GetActorOfClass(GetWorld(), AWeather::StaticClass());

@@ -33,6 +33,8 @@
 
 #include "CarlaGameModeBase.generated.h"
 
+class ASkyBase;
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEpisodeInitialisedDelegate, UCarlaEpisode*, InitialisedEpisode);
 
 /// Base class for the CARLA Game Mode.
@@ -139,6 +141,8 @@ protected:
 
 private:
 
+  void InitializeOpenDriveSky(const FString &MapName);
+
   void SpawnActorFactories();
 
   void StoreSpawnPoints();
@@ -174,6 +178,10 @@ private:
   /// The class of Weather to spawn.
   UPROPERTY(Category = "CARLA Game Mode", EditAnywhere)
   TSubclassOf<AWeather> WeatherClass;
+
+  /// The sky class spawned for dynamically generated OpenDRIVE worlds.
+  UPROPERTY(Category = "CARLA Game Mode", EditAnywhere)
+  TSubclassOf<ASkyBase> OpenDriveSkyClass;
 
   /// List of actor spawners that will be used to define and spawn the actors
   /// available in game.
