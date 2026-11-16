@@ -97,7 +97,9 @@ RUN packages='libsdl2-dev libsdl2-2.0' \
 RUN echo '[global]' > /etc/pip.conf && \
     echo 'break-system-packages = true' >> /etc/pip.conf
 
-RUN python3 -m pip install --upgrade pip \
+# --ignore-installed: the pip that Ubuntu 24.04 installs is managed by apt and
+# cannot be uninstalled by pip; the upgraded one goes to /usr/local and wins.
+RUN python3 -m pip install --upgrade --ignore-installed pip \
     && python3 -m pip install -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 

@@ -18,7 +18,10 @@ RUN apt-get update && \
             git \
         && rm -rf /var/lib/apt/lists/*
 
-# Use system pip (PEP 668): don't upgrade Debian-managed pip to avoid uninstall errors
+# The pip of Ubuntu 24.04 (24.0) backtracks into source builds when it resolves the example
+# requirements. It is managed by apt and cannot be uninstalled by pip (PEP 668), so install
+# a current pip next to it; the one in /usr/local wins.
+RUN python3 -m pip install --break-system-packages --upgrade --ignore-installed pip
 
 # Move over PythonAPI
 COPY ./artifacts/PythonAPI ${CARLA_API_PATH}

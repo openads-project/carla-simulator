@@ -52,8 +52,10 @@ RUN groupadd --gid ${GID} ${USERNAME} \
     && usermod -a -G sudo ${USERNAME}
 
 # Add the carla user to the docker group to allow running Docker commands without sudo when bind-mounting the Docker socket.
-RUN groupadd -g ${DOCKER_GID} docker \
-    && usermod -a -G docker ${USERNAME}
+# The GID may already be taken by a system group of the image (on Ubuntu 24.04, 999 is);
+# what matters for the socket is the GID, so reuse that group instead of failing.
+RUN (getent group ${DOCKER_GID} > /dev/null || groupadd -g ${DOCKER_GID} docker) \
+    && usermod -a -G "$(getent group ${DOCKER_GID} | cut -d: -f1)" ${USERNAME}
 
 USER ${USERNAME}
 
