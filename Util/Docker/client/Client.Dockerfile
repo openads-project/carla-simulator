@@ -24,10 +24,13 @@ RUN apt-get update && \
 COPY ./artifacts/PythonAPI ${CARLA_API_PATH}
 RUN rm -f ${CARLA_API_PATH}/carla/__init__.py
 
-# Recursively install PythonAPI requirements, keep version of first occurrence
-RUN cat $(find ${CARLA_API_PATH} -type f -name "requirements.txt") > /tmp/requirements_raw.txt \
-    && awk -F '==' '{print $1}' /tmp/requirements_raw.txt | awk '!visited[$1]++' > /tmp/requirements.txt \
-    && python3 -m pip install --break-system-packages -r /tmp/requirements.txt
+# Install the requirements of the PythonAPI itself, its examples, utilities and tests.
+# Not every requirements.txt below PythonAPI: since CARLA 1.0 the examples of the
+# AV stacks and the NVIDIA integrations bring their own, with pins that conflict.
+RUN python3 -m pip install --break-system-packages \
+        -r ${CARLA_API_PATH}/examples/requirements.txt \
+        -r ${CARLA_API_PATH}/util/requirements.txt \
+        -r ${CARLA_API_PATH}/test/requirements.txt
 
 # Install CARLA PythonAPI wheel
 RUN set -e; \

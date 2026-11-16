@@ -8,12 +8,20 @@ workflow:
 variables:
   DOCKER_BUILDKIT: "1"
   GIT_SUBMODULE_STRATEGY: recursive
-  UBUNTU_DISTRO: "22.04"
-  UE5_BRANCH: "ue5-dev-carla"
-  UE_VOLUME: "carla-ue5-engine-22.04"
+  UBUNTU_DISTRO: "24.04"
+  UE5_BRANCH: "ue58-dev-carla"
+  # One volume per engine generation: the engine is only built when the volume
+  # holds no editor binary yet.
+  UE_VOLUME: "carla-ue58-engine-24.04"
   CARLA_CONTENT_BRANCH: "ue5"
-  CARLA_CONTENT_BASE_REF: "ue5-dev"
-  carla_version: "0.10.0"
+  # Official CARLA content (branch or tag of bitbucket.org/carla-simulator/carla-content).
+  CARLA_CONTENT_BASE_REF: "1.0"
+  # The NVIDIA DLSS SDK (ray-traced lens cameras, DLSS upscaling) is not used.
+  DLSS_SDK: "disabled"
+  # carla_version names the images, carla_package_version the package files:
+  # upstream versions CARLA as MAJOR.MINOR (Carla-1.0-Linux-Shipping.tar.gz).
+  carla_version: "1.0.0"
+  carla_package_version: "1.0"
   image_carla_release: "$CI_REGISTRY_IMAGE/carla-$carla_version:release"
   image_carla_release_slim: "$CI_REGISTRY_IMAGE/carla-$carla_version:release-slim"
   image_carla_client: "$CI_REGISTRY_IMAGE/carla-$carla_version:client"
@@ -97,6 +105,7 @@ install-unreal-engine:
         --env=GITHUB_USERNAME="$GITHUB_USERNAME" \
         --env=GITHUB_ACCESS_TOKEN="$GITHUB_ACCESS_TOKEN" \
         --env=UE5_BRANCH="$UE5_BRANCH" \
+        --env=DLSS_SDK="$DLSS_SDK" \
         --env=NVIDIA_VISIBLE_DEVICES=all \
         --env=NVIDIA_DRIVER_CAPABILITIES=all \
         --volume "$UE_VOLUME:/workspaces/unreal-engine" \
@@ -163,6 +172,7 @@ build-carla:
         --env=CARLA_UNREAL_ENGINE_PATH=/workspaces/unreal-engine \
         --env=CARLA_CONTENT_BRANCH="$CARLA_CONTENT_BRANCH" \
         --env=CARLA_CONTENT_BASE_REF="$CARLA_CONTENT_BASE_REF" \
+        --env=DLSS_SDK="$DLSS_SDK" \
         --env=CI_JOB_TOKEN="$CI_JOB_TOKEN" \
         --env=NVIDIA_VISIBLE_DEVICES=all \
         --env=NVIDIA_DRIVER_CAPABILITIES=all \
@@ -175,17 +185,18 @@ build-carla:
       rm -rf Unreal/CarlaUnreal/content-openads
       git clone -b "${CARLA_CONTENT_BASE_REF}" --depth 1 https://bitbucket.org/carla-simulator/carla-content.git Unreal/CarlaUnreal/Content/Carla
 
-      git clone \
-        --single-branch --depth 1 -b "${CARLA_CONTENT_BRANCH}" \
-        "https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.ika.rwth-aachen.de/fb-fi/simulation/carla/carla-content.git" \
-        Unreal/CarlaUnreal/content-openads
-      python3 Util/SetupUtils/MergeContentOverlay.py \
-        --base Unreal/CarlaUnreal/Content/Carla \
-        --overlay Unreal/CarlaUnreal/content-openads/Carla
-      echo "Merged content target tree: Unreal/CarlaUnreal/Content/Carla"
-      find Unreal/CarlaUnreal/Content/Carla -print | sort
+      # TODO(openads): re-enable once the OpenADS content overlay is migrated to UE 5.8.
+      # git clone \
+      #   --single-branch --depth 1 -b "${CARLA_CONTENT_BRANCH}" \
+      #   "https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.ika.rwth-aachen.de/fb-fi/simulation/carla/carla-content.git" \
+      #   Unreal/CarlaUnreal/content-openads
+      # python3 Util/SetupUtils/MergeContentOverlay.py \
+      #   --base Unreal/CarlaUnreal/Content/Carla \
+      #   --overlay Unreal/CarlaUnreal/content-openads/Carla
+      # echo "Merged content target tree: Unreal/CarlaUnreal/Content/Carla"
+      # find Unreal/CarlaUnreal/Content/Carla -print | sort
 
-      cmake --preset Release -DENABLE_ROS2=ON -DBUILD_LIBCARLA_TESTS=ON
+      cmake --preset Release -DENABLE_ROS2=ON -DBUILD_LIBCARLA_TESTS=ON -DCARLA_DLSS_SDK_PATH=disabled
 
       cmake --build Build/Release --target carla-client
       cmake --build Build/Release --target carla-python-api
@@ -204,8 +215,8 @@ build-carla:
       cmake --build Build/Release --target package-slim
       EOF
 
-      PACKAGE_FILE="Carla-${carla_version}-Linux-Shipping.tar.gz"
-      SLIM_PACKAGE_FILE="Carla-${carla_version}-Linux-Shipping-Slim.tar.gz"
+      PACKAGE_FILE="Carla-${carla_package_version}-Linux-Shipping.tar.gz"
+      SLIM_PACKAGE_FILE="Carla-${carla_package_version}-Linux-Shipping-Slim.tar.gz"
 
       docker run --rm \
         --volume "$CARLA_SRC_VOLUME:/workspaces/carla:ro" \
@@ -273,7 +284,7 @@ build-client-docker-image:
       rm -rf "$DOCKER_BUILD_CONTEXT"
       mkdir "$DOCKER_BUILD_CONTEXT"
 
-      PACKAGE_BASENAME="Carla-${carla_version}-Linux-Shipping${PACKAGE_SUFFIX}"
+      PACKAGE_BASENAME="Carla-${carla_package_version}-Linux-Shipping${PACKAGE_SUFFIX}"
       PACKAGE_FILE="${PACKAGE_BASENAME}.tar.gz"
       PACKAGE_COPY_CONTAINER="carla-release-package-copy-${CI_JOB_ID}"
       docker rm -f "$PACKAGE_COPY_CONTAINER" >/dev/null 2>&1 || true
