@@ -26,6 +26,11 @@ namespace {
 
 constexpr float kEpsilon = 1e-4f;
 
+// A static transform is repeated once per second of simulation time. Latching
+// alone does not reach every late joiner: the Zenoh middleware advertises
+// TRANSIENT_LOCAL but does not replay the last sample.
+constexpr double kStaticRepublishPeriod = 1.0;
+
 bool IsSameTransform(
     const CarlaTransformPublisher::CachedTransform &cached,
     float tx, float ty, float tz,
@@ -59,12 +64,14 @@ CarlaTransformPublisher::CarlaTransformPublisher(bool is_static)
 CarlaTransformPublisher::~CarlaTransformPublisher() = default;
 
 bool CarlaTransformPublisher::Publish() {
-  if (_is_static && _has_published) {
+  if (_is_static && !_static_publish_due) {
     return true;
   }
   const bool published = _impl->Publish();
-  if (published) {
+  if (published && _is_static) {
     _has_published = true;
+    _static_publish_due = false;
+    _last_static_publish = _pending_static_time;
   }
   return published;
 }
@@ -78,6 +85,7 @@ bool CarlaTransformPublisher::Write(
     float pitch_deg, float yaw_deg, float roll_deg) {
   std::array<float, 3> translation;
   std::array<float, 4> rotation;
+  bool changed = false;
 
   auto it = _last_transforms.find(child_frame_id);
   if (it != _last_transforms.end()
@@ -85,6 +93,7 @@ bool CarlaTransformPublisher::Write(
     translation = it->second.translation;
     rotation = it->second.rotation;
   } else {
+    changed = true;
     // Quaternion conversion lives in TransformQuaternion.h (header-only
     // seam, pinned by test_transform_quaternion.cpp).
     const auto computed =
@@ -95,6 +104,19 @@ bool CarlaTransformPublisher::Write(
         child_frame_id,
         CachedTransform{
             tx, ty, tz, pitch_deg, yaw_deg, roll_deg, translation, rotation});
+  }
+
+  if (_is_static) {
+    // Publish the first sample, every change (an attached sensor that was
+    // moved), and otherwise one repeat per period. The clock restarts when a
+    // new episode begins, hence the check for time running backwards.
+    const double now = static_cast<double>(seconds) + 1e-9 * static_cast<double>(nanoseconds);
+    if (!_has_published || changed
+        || now < _last_static_publish
+        || now - _last_static_publish >= kStaticRepublishPeriod) {
+      _static_publish_due = true;
+      _pending_static_time = now;
+    }
   }
 
   // Static transforms hold for all times, which tf2 expresses as a zero stamp.

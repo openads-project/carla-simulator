@@ -165,9 +165,11 @@ The transform tree is rooted in `carla_map`, the origin of the CARLA world. The 
 
 | Actor | Topic | Transform |
 | --- | --- | --- |
-| A sensor attached to a parent | `/tf_static` | parent frame → sensor frame, latched (reliable, transient local), zero stamp |
+| A sensor attached to a parent | `/tf_static` | parent frame → sensor frame, latched (reliable, transient local), zero stamp, repeated once per second of simulation time |
 | A sensor without a parent | `/tf` | `carla_map` → sensor frame, every sensor tick |
 | The parent of a [`sensor.other.tf`](ros2_native_sensors.md#published-sensors) | `/tf` | `carla_map` → parent frame, every sensor tick |
+
+The repeat on `/tf_static` is there for late joiners: the Zenoh middleware announces the latched QoS but does not replay the last sample, so a subscriber that starts after the sensor was spawned would otherwise never see its transform. A sensor that ticks less than once per second repeats at its own rate.
 
 A vehicle has no transform of its own: attach a `sensor.other.tf` to it to connect it, and with it every sensor on it, to `carla_map`. A [`sensor.other.odometry`](ros2_native_sensors.md#published-sensors) publishes the same pose together with the velocity as `nav_msgs/Odometry`. Both take two attributes that flatten the pose for stacks that work in the plane: `ignore_altitude` sets z to zero, `ignore_tilt` sets roll and pitch to zero. `sensor.other.imu` takes `ignore_tilt` as well.
 
