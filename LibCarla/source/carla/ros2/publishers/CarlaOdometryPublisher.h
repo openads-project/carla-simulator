@@ -32,6 +32,7 @@ public:
   bool Write(
       std::int32_t seconds,
       std::uint32_t nanoseconds,
+      const std::string &frame_id,
       const std::string &child_frame_id,
       float tx, float ty, float tz,
       float pitch_deg, float yaw_deg, float roll_deg,

@@ -8,25 +8,27 @@
 
 #include "carla/Logging.h"
 #include "carla/ros2/publishers/PublisherImpl.h"
-#include "carla/ros2/types/String.h"
-#include "carla/ros2/types/StringPubSubTypes.h"
+#include "carla/ros2/types/msg/String.h"
 
 namespace carla {
 namespace ros2 {
 
+namespace {
+constexpr const char *kBasicPublisherTopic = "rt/basic_publisher_example";
+}  // namespace
+
 struct BasicPublisherMsgTraits {
-  using msg_type = std_msgs::msg::String;
-  using msg_pubsub_type = std_msgs::msg::StringPubSubType;
+  using msg_type = msg::String;
 };
 
-BasicPublisher::BasicPublisher(std::string ros_name, std::string parent)
-  : BasePublisher(std::move(parent), std::move(ros_name)),
+BasicPublisher::BasicPublisher()
+  : BasePublisher(kBasicPublisherTopic, ""),
     _impl(std::make_shared<PublisherImpl<BasicPublisherMsgTraits>>()) {}
 
 BasicPublisher::~BasicPublisher() = default;
 
 bool BasicPublisher::Init() {
-  return _impl->Init("rt/basic_publisher_example");
+  return _impl->Init(kBasicPublisherTopic);
 }
 
 bool BasicPublisher::Publish() {
@@ -34,7 +36,7 @@ bool BasicPublisher::Publish() {
 }
 
 void BasicPublisher::SetData(const std::string &msg) {
-  _impl->GetMessage()->data(msg);
+  _impl->GetMessage()->data = msg;
 }
 
 }  // namespace ros2

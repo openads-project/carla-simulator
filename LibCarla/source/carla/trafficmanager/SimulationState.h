@@ -20,7 +20,6 @@ struct KinematicState {
   cg::Vector3D velocity;
   float speed_limit;
   bool physics_enabled;
-  bool is_dormant;
   cg::Location hybrid_end_location;
 };
 using KinematicStateMap = std::unordered_map<ActorId, KinematicState>;
@@ -36,6 +35,10 @@ struct StaticAttributes {
   float half_length;
   float half_width;
   float half_height;
+  // Physical front-wheel steering lock in degrees (vehicles only). Queried
+  // once at registration from the vehicle physics control; the default is the
+  // car-class value the controller gains are anchored on.
+  float max_steer_angle = 70.0f;
 };
 using StaticAttributeMap = std::unordered_map<ActorId, StaticAttributes>;
 
@@ -90,15 +93,14 @@ public :
 
   bool IsPhysicsEnabled(const ActorId actor_id) const;
 
-  bool IsDormant(const ActorId actor_id) const;
-
-  cg::Location GetHeroLocation(const ActorId actor_id) const;
 
   TrafficLightState GetTLS(const ActorId actor_id) const;
 
   ActorType GetType(const ActorId actor_id) const;
 
   cg::Vector3D GetDimensions(const ActorId actor_id) const;
+
+  float GetMaxSteerAngle(const ActorId actor_id) const;
 
 };
 

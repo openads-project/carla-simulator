@@ -8,21 +8,20 @@
 
 #include "carla/Logging.h"
 #include "carla/ros2/publishers/PublisherImpl.h"
-#include "carla/ros2/types/Clock.h"
-#include "carla/ros2/types/ClockPubSubTypes.h"
+#include "carla/ros2/types/msg/Clock.h"
 
 namespace carla {
 namespace ros2 {
 
 struct CarlaClockMsgTraits {
-  using msg_type = rosgraph::msg::Clock;
-  using msg_pubsub_type = rosgraph::msg::ClockPubSubType;
+  using msg_type = msg::Clock;
 };
 
 CarlaClockPublisher::CarlaClockPublisher()
   : BasePublisher("rt/clock"),
     _impl(std::make_shared<PublisherImpl<CarlaClockMsgTraits>>()) {
-  if (!_impl->Init(GetBaseTopicName())) {
+  _ready = _impl->Init(GetBaseTopicName());
+  if (!_ready) {
     log_error("CarlaClockPublisher: failed to initialise writer for rt/clock");
   }
 }
@@ -35,8 +34,8 @@ bool CarlaClockPublisher::Publish() {
 
 bool CarlaClockPublisher::Write(std::int32_t seconds, std::uint32_t nanoseconds) {
   auto *message = _impl->GetMessage();
-  message->clock().sec(seconds);
-  message->clock().nanosec(nanoseconds);
+  message->clock.sec = seconds;
+  message->clock.nanosec = nanoseconds;
   return true;
 }
 

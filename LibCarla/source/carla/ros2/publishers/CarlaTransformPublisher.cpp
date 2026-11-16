@@ -7,10 +7,11 @@
 #include "carla/ros2/publishers/CarlaTransformPublisher.h"
 
 #include "carla/Logging.h"
+#include "carla/ros2/middleware/QosProfile.h"
 #include "carla/ros2/publishers/PublisherImpl.h"
 #include "carla/ros2/publishers/TransformQuaternion.h"
-#include "carla/ros2/types/TFMessage.h"
-#include "carla/ros2/types/TFMessagePubSubTypes.h"
+#include "carla/ros2/types/msg/TFMessage.h"
+#include "carla/ros2/types/msg/TransformStamped.h"
 
 #include <cmath>
 
@@ -18,8 +19,7 @@ namespace carla {
 namespace ros2 {
 
 struct CarlaTransformMsgTraits {
-  using msg_type = tf2_msgs::msg::TFMessage;
-  using msg_pubsub_type = tf2_msgs::msg::TFMessagePubSubType;
+  using msg_type = msg::TFMessage;
 };
 
 namespace {
@@ -44,7 +44,12 @@ CarlaTransformPublisher::CarlaTransformPublisher(bool is_static)
   : BasePublisher(is_static ? "rt/tf_static" : "rt/tf"),
     _impl(std::make_shared<PublisherImpl<CarlaTransformMsgTraits>>()),
     _is_static(is_static) {
-  if (!_impl->Init(GetBaseTopicName(), _is_static)) {
+  // /tf_static is latched (RELIABLE / TRANSIENT_LOCAL / KEEP_LAST 1), the QoS
+  // tf2 static listeners subscribe with.
+  const bool initialised = _is_static
+      ? _impl->Init(GetBaseTopicName(), QosProfile::ReliableTransientLocal())
+      : _impl->Init(GetBaseTopicName());
+  if (!initialised) {
     log_error(
         "CarlaTransformPublisher: failed to initialise writer for ",
         GetBaseTopicName());
@@ -92,21 +97,22 @@ bool CarlaTransformPublisher::Write(
             tx, ty, tz, pitch_deg, yaw_deg, roll_deg, translation, rotation});
   }
 
-  geometry_msgs::msg::TransformStamped ts;
-  ts.header().stamp().sec(_is_static ? 0 : seconds);
-  ts.header().stamp().nanosec(_is_static ? 0u : nanoseconds);
-  ts.header().frame_id(parent_frame_id);
-  ts.child_frame_id(child_frame_id);
+  // Static transforms hold for all times, which tf2 expresses as a zero stamp.
+  msg::TransformStamped ts{};
+  ts.header.stamp.sec = _is_static ? 0 : seconds;
+  ts.header.stamp.nanosec = _is_static ? 0u : nanoseconds;
+  ts.header.frame_id = parent_frame_id;
+  ts.child_frame_id = child_frame_id;
 
-  ts.transform().translation().x(translation[0]);
-  ts.transform().translation().y(translation[1]);
-  ts.transform().translation().z(translation[2]);
-  ts.transform().rotation().w(rotation[0]);
-  ts.transform().rotation().x(rotation[1]);
-  ts.transform().rotation().y(rotation[2]);
-  ts.transform().rotation().z(rotation[3]);
+  ts.transform.translation.x = translation[0];
+  ts.transform.translation.y = translation[1];
+  ts.transform.translation.z = translation[2];
+  ts.transform.rotation.w = rotation[0];
+  ts.transform.rotation.x = rotation[1];
+  ts.transform.rotation.y = rotation[2];
+  ts.transform.rotation.z = rotation[3];
 
-  _impl->GetMessage()->transforms({ts});
+  _impl->GetMessage()->transforms = {ts};
   return true;
 }
 

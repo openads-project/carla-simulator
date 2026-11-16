@@ -23,6 +23,7 @@
 
 class UCarlaEpisode;
 class FCarlaActor;
+class UPrimitiveComponent;
 struct FActorDescription;
 
 class CarlaReplayerHelper
@@ -61,8 +62,13 @@ public:
   // set the animation for Vehicles
   void ProcessReplayerAnimVehicle(CarlaRecorderAnimVehicle Vehicle);
 
-  // set the animation for Vehicles Wheels
-  void ProcessReplayerAnimVehicleWheels(CarlaRecorderAnimWheels Vehicle);
+  // set the animation for Vehicles Wheels, interpolating like the positions;
+  // Travel is how far the vehicle moves forward from Wheels1 to Wheels2, in cm
+  void ProcessReplayerAnimVehicleWheels(
+      const CarlaRecorderAnimWheels &Wheels1,
+      const CarlaRecorderAnimWheels &Wheels2,
+      double Per,
+      float Travel);
 
   // set the animation for walkers
   void ProcessReplayerAnimWalker(CarlaRecorderAnimWalker Walker);
@@ -102,6 +108,18 @@ public:
 private:
 
   UCarlaEpisode *Episode {nullptr};
+
+  // Collision state of the replayed actors' primitives, restored when the replay finishes.
+  struct FReplayedPrimitive
+  {
+    TWeakObjectPtr<UPrimitiveComponent> Primitive;
+    uint8 CollisionEnabled;
+    bool bGenerateOverlapEvents;
+  };
+  TArray<FReplayedPrimitive> ReplayedPrimitives;
+
+  // Keep a replayed actor visible to sensors without letting it push anything or fire overlaps.
+  void MakeReplayedActorQueryOnly(AActor *Actor);
 
   std::pair<int, FCarlaActor*>TryToCreateReplayerActor(
     FVector &Location,

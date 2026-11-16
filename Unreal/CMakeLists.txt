@@ -8,6 +8,8 @@ project (
     "Open-source simulator for autonomous driving research."
 )
 
+include (${CMAKE_CURRENT_SOURCE_DIR}/Package/GenerateCookedMapStaging.cmake)
+
 carla_option (
   ENABLE_DIRECTORY_CLEAN
   "Enable ADDITIONAL_CLEAN_FILES on directory level"
@@ -49,7 +51,7 @@ set (
   ${CARLA_UE_PATH}/Content/Carla
 )
 
-if (NOT EXISTS ${CARLA_UE_CONTENT_PATH}/.git)
+if (NOT IS_DIRECTORY ${CARLA_UE_CONTENT_PATH})
   carla_error ("Missing CARLA content.")
 endif ()
 
@@ -57,6 +59,10 @@ set (
   UNREAL_EDITOR_PATH
   ${CARLA_UNREAL_ENGINE_PATH}/Engine/Binaries/${UE_SYSTEM_NAME}/UnrealEditor${EXE_EXT}
 )
+
+# Resolve the NVIDIA DLSS SDK (defines CARLA_UE_DLSS_ENV_COMMAND, which every
+# Unreal build/package/launch command below is prefixed with).
+include (${CARLA_WORKSPACE_PATH}/CMake/DLSS.cmake)
 
 set (CARLA_UE_CONTENT_CHECK_PATH ${CARLA_UE_PATH}/Content/Carla/Blueprints)
 if (IS_DIRECTORY ${CARLA_UE_CONTENT_CHECK_PATH})
@@ -190,32 +196,31 @@ if (ENABLE_ROS2_DEMO)
   )
 endif()
 
-if (ENABLE_OSM2ODR)
-  list (
-    APPEND
-    CARLA_UNREAL_OPTIONS
-    "OSM2ODR"
-  )
-endif()
 
 
-
+# Both prefixes run through CARLA_UE_DLSS_ENV_COMMAND so UnrealBuildTool sees
+# DLSS_SDK (the engine's DLSSRRDenoiser plugin fails its build without it)
+# regardless of the environment `cmake --build` was invoked from.
 if (WIN32)
   set (
     CARLA_UE_BUILD_COMMAND_PREFIX
+      ${CARLA_UE_DLSS_ENV_COMMAND}
       ${CARLA_UNREAL_ENGINE_PATH}/Engine/Build/BatchFiles/Build.bat
   )
   set (
     CARLA_UE_UAT_COMMAND_PREFIX
+      ${CARLA_UE_DLSS_ENV_COMMAND}
       ${CARLA_UNREAL_ENGINE_PATH}/Engine/Build/BatchFiles/RunUAT.bat
   )
 else ()
   set (
     CARLA_UE_BUILD_COMMAND_PREFIX
+      ${CARLA_UE_DLSS_ENV_COMMAND}
       ${CARLA_UNREAL_ENGINE_PATH}/Engine/Build/BatchFiles/${UE_SYSTEM_NAME}/Build.sh
   )
   set (
     CARLA_UE_UAT_COMMAND_PREFIX
+      ${CARLA_UE_DLSS_ENV_COMMAND}
       ${CARLA_UNREAL_ENGINE_PATH}/Engine/Build/BatchFiles/RunUAT.sh
   )
 endif ()
@@ -330,6 +335,37 @@ file (
 
 
 
+# The Carla plugin module links libcarla-server and librpc by SONAME and its
+# rpath is ${ORIGIN}-only, so stage both beside it or the module fails to load.
+set (
+  CARLA_PLUGIN_BINARY_PATH
+  ${CARLA_UE_PATH}/Plugins/Carla/Binaries/${UE_SYSTEM_NAME}
+)
+
+file (MAKE_DIRECTORY ${CARLA_PLUGIN_BINARY_PATH})
+
+add_custom_target (
+  carla-unreal-stage-libraries
+  COMMAND
+    ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:carla-server> ${CARLA_PLUGIN_BINARY_PATH}
+  COMMAND
+    ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:rpc> ${CARLA_PLUGIN_BINARY_PATH}
+  DEPENDS
+    carla-server
+    rpc
+  VERBATIM
+)
+
+list (
+  APPEND
+  UE_DEPENDENCIES_ORDER_ONLY
+  carla-unreal-stage-libraries
+)
+
+
+
 carla_add_custom_target (
   carla-unreal
   "Build the CarlaUnreal subproject."
@@ -438,13 +474,14 @@ function (
   endif ()
 
   set (CUSTOM_CONFIG_ARGUMENT)
-  set (COOK_MAP_ARGUMENT)
   set (COOK_MODE_ARGUMENT -iterate)
   set (PACKAGE_PRE_BUILD_COMMANDS)
 
+  # A package variant brings its own map list; every other package cooks
+  # CARLA_MAPS_TO_COOK (empty: the +MapsToCook list of DefaultGame.ini).
+  set (PACKAGE_MAPS_TO_COOK "${CARLA_MAPS_TO_COOK}")
   if (COOK_MAPS)
-    list (JOIN COOK_MAPS "+" COOK_MAPS_ARGUMENT)
-    set (COOK_MAP_ARGUMENT -map=${COOK_MAPS_ARGUMENT})
+    list (JOIN COOK_MAPS "+" PACKAGE_MAPS_TO_COOK)
   endif ()
 
   if (NOT "${CUSTOM_CONFIG}" STREQUAL "")
@@ -465,6 +502,58 @@ function (
 
   set (TARGET_NAME_SHORT package${TARGET_NAME_SUFFIX})
   set (TARGET_NAME carla-unreal-${TARGET_NAME_SHORT})
+
+  set (CARLA_PACKAGE_EXTRA_UAT_ARGS)
+  if (NOT "${PACKAGE_MAPS_TO_COOK}" STREQUAL "")
+    list (APPEND CARLA_PACKAGE_EXTRA_UAT_ARGS "-MapsToCook=${PACKAGE_MAPS_TO_COOK}")
+    carla_message ("package(${PACKAGE_CONFIGURATION}): cooking only ${PACKAGE_MAPS_TO_COOK}")
+  endif ()
+
+  # The cooked maps' OpenDRIVE/TM/Nav files are not assets and ship only when
+  # their directory is staged, so derive those entries from the cook scope.
+  # The generated ini is one file per project, written at configure time, so a
+  # package variant must not rewrite it: the sidecar directories of its maps are
+  # staged through the static entries of DefaultGame.ini.
+  if ("${PACKAGE_VARIANT}" STREQUAL "")
+    carla_generate_cooked_map_staging (
+      "${CARLA_MAPS_TO_COOK}"
+      "${CARLA_UE_PATH}"
+      "${UE_SYSTEM_NAME}"
+    )
+  endif ()
+
+  # Content packs (Plugins/Packs/*) are cooked as DLC "based on" this release:
+  # the cook writes Unreal/CarlaUnreal/Releases/<release>/<Platform>/
+  # (AssetRegistry.bin + pak/container lists) which a pack cook needs as its
+  # base. The release name is stamped into the package (CarlaUnreal/BaseRelease)
+  # and the Releases/<release> dir is archived next to the package tarball.
+  if ("${CARLA_BASE_RELEASE}" STREQUAL "")
+    set (CARLA_BASE_RELEASE_NAME carla-${CARLA_VERSION}-${UE_SYSTEM_NAME})
+  else ()
+    set (CARLA_BASE_RELEASE_NAME ${CARLA_BASE_RELEASE})
+  endif ()
+  if (NOT "${PACKAGE_VARIANT}" STREQUAL "")
+    # Keep the release metadata of a variant apart from the full package's.
+    string (APPEND CARLA_BASE_RELEASE_NAME -${PACKAGE_VARIANT})
+  endif ()
+  list (APPEND CARLA_PACKAGE_EXTRA_UAT_ARGS "-createreleaseversion=${CARLA_BASE_RELEASE_NAME}")
+
+  if (CARLA_IGNORE_COOK_ERRORS)
+    list (APPEND CARLA_PACKAGE_EXTRA_UAT_ARGS "-IgnoreCookErrors")
+    carla_warning ("package(${PACKAGE_CONFIGURATION}): CARLA_IGNORE_COOK_ERRORS is ON, cook errors will not fail the package target")
+  endif ()
+  set (CARLA_RELEASES_PATH ${CARLA_UE_PROJECT_PATH}/../Releases)
+  cmake_path (NORMAL_PATH CARLA_RELEASES_PATH)
+  set (CARLA_PACKS_ROOT ${CARLA_UE_PROJECT_PATH}/../Plugins/Packs)
+  cmake_path (NORMAL_PATH CARLA_PACKS_ROOT)
+  set (
+    CARLA_PACK_LEAK_IGNORE
+    ""
+    CACHE STRING
+    "Content pack names (semicolon-separated) the post-cook leak check \
+(Package/CheckNoPackLeak.cmake) skips; only for a pack whose name equals a \
+base content folder."
+  )
 
   carla_add_custom_target (
     ${TARGET_NAME}
@@ -487,6 +576,10 @@ function (
       -nop4
       -cook
       -stage
+      # UE 5.8 cooks into the local Zen store; without -pak -iostore staging
+      # finds no loose cooked files and silently ships a binaries-only package.
+      -pak
+      -iostore
       -archive
       -package
       ${COOK_MODE_ARGUMENT}
@@ -495,10 +588,13 @@ function (
       -Platform=${UE_SYSTEM_NAME}
       -prereqs
       -build
+      # DefaultGame.ini's CulturesToStage setting is not consumed by
+      # BuildCookRun staging; pass it explicitly so packaged builds include ICU.
+      -culturesToStage=en
       -stagingdirectory=${CARLA_PACKAGE_STAGING_PATH}
       -archivedirectory=${CARLA_PACKAGE_ARCHIVE_PATH}
       ${CUSTOM_CONFIG_ARGUMENT}
-      ${COOK_MAP_ARGUMENT}
+      ${CARLA_PACKAGE_EXTRA_UAT_ARGS}
     USES_TERMINAL
     VERBATIM
   )
@@ -519,13 +615,50 @@ function (
       -P${CMAKE_CURRENT_SOURCE_DIR}/Package/RemoveUnrealPackageExtraFiles.cmake
     COMMAND ${CMAKE_COMMAND} -E echo "********** PACKAGE REMOVING UNREAL PACKAGE EXTRA FILES COMPLETED **********"
 
+    COMMAND ${CMAKE_COMMAND} -E echo "********** PACKAGE FLATTENING LAYOUT STARTED **********"
+    COMMAND ${CMAKE_COMMAND}
+      -DCARLA_PACKAGE_ARCHIVE_PATH=${CARLA_PACKAGE_ARCHIVE_PATH}
+      -DUE_SYSTEM_NAME=${UE_SYSTEM_NAME}
+      -P${CMAKE_CURRENT_SOURCE_DIR}/Package/FlattenPackageLayout.cmake
+    COMMAND ${CMAKE_COMMAND} -E echo "********** PACKAGE FLATTENING LAYOUT COMPLETED **********"
+
     COMMAND ${CMAKE_COMMAND} -E echo "********** PACKAGE COPYING CARLA ADDITIONAL FILES STARTED **********"
     COMMAND ${CMAKE_COMMAND}
       -DCARLA_BUILD_PATH=${CARLA_BUILD_PATH}
       -DCARLA_WORKSPACE_PATH=${CARLA_WORKSPACE_PATH}
       -DCARLA_PACKAGE_ARCHIVE_PATH=${CARLA_PACKAGE_ARCHIVE_PATH}
+      -DCARLA_UE_PROJECT_PATH=${CARLA_UE_PROJECT_PATH}
+      -DCARLA_PYTHON_API_DIST_PATH=${CARLA_PYTHON_API_DIST_PATH}
+      -DCARLA_DLSS_SDK_RESOLVED=${CARLA_DLSS_SDK_RESOLVED}
+      -DCARLA_VERSION=${CARLA_VERSION}
       -P${CMAKE_CURRENT_SOURCE_DIR}/Package/CopyCarlaAdditionalFiles.cmake
     COMMAND ${CMAKE_COMMAND} -E echo "********** PACKAGE COPYING CARLA ADDITIONAL FILES COMPLETED **********"
+
+    # Fails the package if a content pack (Plugins/Packs/*) was cooked into the
+    # base: /<Pack>/ in the cooked registries or Plugins/Packs/<Pack>/ staged.
+    COMMAND ${CMAKE_COMMAND} -E echo "********** PACKAGE CONTENT PACK LEAK CHECK STARTED **********"
+    COMMAND ${CMAKE_COMMAND}
+      -DCARLA_PACKS_ROOT=${CARLA_PACKS_ROOT}
+      -DCARLA_BASE_RELEASE_NAME=${CARLA_BASE_RELEASE_NAME}
+      -DCARLA_RELEASES_PATH=${CARLA_RELEASES_PATH}
+      -DCARLA_PACKAGE_STAGING_PATH=${CARLA_PACKAGE_STAGING_PATH}
+      -DCARLA_PACKAGE_ARCHIVE_PATH=${CARLA_PACKAGE_ARCHIVE_PATH}
+      -DUE_SYSTEM_NAME=${UE_SYSTEM_NAME}
+      -DCARLA_PACK_LEAK_IGNORE=${CARLA_PACK_LEAK_IGNORE}
+      -DCARLA_CONTENT_PACKS_TOOL=${CARLA_WORKSPACE_PATH}/Util/ContentPacks/carla_pack.py
+      -DCARLA_CONTENT_PACKS_PYTHON=${CARLA_CONTENT_PACKS_PYTHON}
+      -P${CMAKE_CURRENT_SOURCE_DIR}/Package/CheckNoPackLeak.cmake
+    COMMAND ${CMAKE_COMMAND} -E echo "********** PACKAGE CONTENT PACK LEAK CHECK COMPLETED **********"
+
+    COMMAND ${CMAKE_COMMAND} -E echo "********** PACKAGE BASE RELEASE METADATA STARTED **********"
+    COMMAND ${CMAKE_COMMAND}
+      -DCARLA_BASE_RELEASE_NAME=${CARLA_BASE_RELEASE_NAME}
+      -DCARLA_RELEASES_PATH=${CARLA_RELEASES_PATH}
+      -DCARLA_PACKAGE_PATH=${CARLA_PACKAGE_PATH}
+      -DCARLA_PACKAGE_ARCHIVE_PATH=${CARLA_PACKAGE_ARCHIVE_PATH}
+      -DUE_SYSTEM_NAME=${UE_SYSTEM_NAME}
+      -P${CMAKE_CURRENT_SOURCE_DIR}/Package/CreateBaseReleaseMetadata.cmake
+    COMMAND ${CMAKE_COMMAND} -E echo "********** PACKAGE BASE RELEASE METADATA COMPLETED **********"
   )
 
   if (NOT ${CARLA_UNREAL_PACKAGE_NO_COMPRESSION})
@@ -596,19 +729,25 @@ add_carla_ue_package_target(
 
 set (LAUNCH_ARGS ${CARLA_LAUNCH_ARGS})
 
+# UE5's FParse::Param only recognizes single-dash switches ("--ros2" is
+# silently ignored because the character before the dash must be whitespace).
 if (ENABLE_ROS2)
-  list (APPEND LAUNCH_ARGS --ros2)
+  list (APPEND LAUNCH_ARGS -ros2)
 endif()
 
 if (ENABLE_ROS2_DEMO)
-  list (APPEND LAUNCH_ARGS --ros2-demo)
+  list (APPEND LAUNCH_ARGS -ros2-demo)
 endif()
 
+# The editor also needs DLSS_SDK at runtime: NGX loads the DLSS model
+# snippets from $DLSS_SDK/lib/<platform>/rel when the first DLSS-enabled
+# sensor is created.
 set (
   CARLA_LAUNCH_TARGET_OPTIONS
   COMMENT
     "Launching Carla Unreal..."
   COMMAND
+    ${CARLA_UE_DLSS_ENV_COMMAND}
     ${UNREAL_EDITOR_PATH}
       ${CARLA_UE_PROJECT_PATH}
       -${CARLA_UNREAL_RHI}

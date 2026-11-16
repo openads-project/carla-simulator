@@ -88,10 +88,9 @@ void export_actor() {
   enum_<cr::ActorState>("ActorState")
     .value("Invalid", cr::ActorState::Invalid)
     .value("Active", cr::ActorState::Active)
-    .value("Dormant", cr::ActorState::Dormant)
   ;
 
-  class_<std::vector<int>>("vector_of_ints")
+  class_<std::vector<int>>("VectorOfInts")
       .def(vector_indexing_suite<std::vector<int>>())
       .def(self_ns::str(self_ns::self))
   ;
@@ -104,7 +103,6 @@ void export_actor() {
       .add_property("semantic_tags", &GetSemanticTags)
       .add_property("actor_state", CALL_WITHOUT_GIL(cc::Actor, GetActorState))
       .add_property("is_alive", CALL_WITHOUT_GIL(cc::Actor, IsAlive))
-      .add_property("is_dormant", CALL_WITHOUT_GIL(cc::Actor, IsDormant))
       .add_property("is_active", CALL_WITHOUT_GIL(cc::Actor, IsActive))
       .add_property("attributes", +[] (const cc::Actor &self) {
         boost::python::dict attribute_dict;
@@ -137,6 +135,8 @@ void export_actor() {
       .def("set_target_angular_velocity", &cc::Actor::SetTargetAngularVelocity, (arg("angular_velocity")))
       .def("enable_constant_velocity", &cc::Actor::EnableConstantVelocity, (arg("velocity")))
       .def("disable_constant_velocity", &cc::Actor::DisableConstantVelocity)
+      .def("enable_constant_acceleration", &cc::Actor::EnableConstantAcceleration, (arg("acceleration")))
+      .def("disable_constant_acceleration", &cc::Actor::DisableConstantAcceleration)
       .def("add_impulse", &AddActorImpulse, (arg("impulse"))) 
       .def("add_impulse_at_location", &AddActorImpulseAtLocation, (arg("impulse"), arg("location")))
       .def("add_force", &AddActorForce, (arg("force")))
@@ -181,6 +181,8 @@ void export_actor() {
     .value("FR", cr::VehicleDoor::FR)
     .value("RL", cr::VehicleDoor::RL)
     .value("RR", cr::VehicleDoor::RR)
+    .value("Hood", cr::VehicleDoor::Hood)
+    .value("Trunk", cr::VehicleDoor::Trunk)
     .value("All", cr::VehicleDoor::All)
   ;
 
@@ -199,8 +201,14 @@ void export_actor() {
       .def("set_light_state", &cc::Vehicle::SetLightState, (arg("light_state")))
       .def("open_door", &cc::Vehicle::OpenDoor, (arg("door_idx")))
       .def("close_door", &cc::Vehicle::CloseDoor, (arg("door_idx")))
+      .def("is_door_open", &cc::Vehicle::IsDoorOpen, (arg("door_idx")))
       .def("set_wheel_steer_direction", &cc::Vehicle::SetWheelSteerDirection, (arg("wheel_location")), (arg("angle_in_deg")))
       .def("get_wheel_steer_angle", &cc::Vehicle::GetWheelSteerAngle, (arg("wheel_location")))
+      .def("set_wheel_pitch_angle", &cc::Vehicle::SetWheelPitchAngle, (arg("wheel_location")), (arg("angle_in_deg")))
+      .def("get_wheel_pitch_angle", &cc::Vehicle::GetWheelPitchAngle, (arg("wheel_location")))
+      .def("set_wheel_suspension_offset", &cc::Vehicle::SetWheelSuspensionOffset, (arg("wheel_location")), (arg("offset")))
+      .def("get_wheel_suspension_offset", &cc::Vehicle::GetWheelSuspensionOffset, (arg("wheel_location")))
+      .def("set_wheel_animation_override", &cc::Vehicle::SetWheelAnimationOverride, (arg("enabled")))
       .def("get_light_state", CONST_CALL_WITHOUT_GIL(cc::Vehicle, GetLightState))
       .def("apply_physics_control", &cc::Vehicle::ApplyPhysicsControl, (arg("physics_control")))
       .def("get_physics_control", CONST_CALL_WITHOUT_GIL(cc::Vehicle, GetPhysicsControl))
@@ -215,9 +223,9 @@ void export_actor() {
       .def("get_traffic_light", &cc::Vehicle::GetTrafficLight)
       .def("enable_carsim", &cc::Vehicle::EnableCarSim, (arg("simfile_path") = ""))
       .def("use_carsim_road", &cc::Vehicle::UseCarSimRoad, (arg("enabled")))
-      .def("enable_chrono_physics", &cc::Vehicle::EnableChronoPhysics, (arg("max_substeps")=30, arg("max_substep_delta_time")=0.002, arg("vehicle_json")="", arg("powetrain_json")="", arg("tire_json")="", arg("base_json_path")=""))
+      .def("enable_chrono_physics", &cc::Vehicle::EnableChronoPhysics, (arg("max_substeps")=30, arg("max_substep_delta_time")=0.002, arg("vehicle_json")="", arg("powertrain_json")="", arg("tire_json")="", arg("base_json_path")=""))
       .def("get_failure_state", &cc::Vehicle::GetFailureState)
-      .def("get_vehicle_bone_world_transforms", &cc::Vehicle::GetVehicleBoneWorldTransforms)
+      .def("get_vehicle_bone_world_transforms", CALL_RETURNING_LIST(cc::Vehicle, GetVehicleBoneWorldTransforms))
       .def(self_ns::str(self_ns::self))
   ;
 
@@ -245,6 +253,9 @@ void export_actor() {
       "TrafficSign",
       no_init)
       .add_property("trigger_volume", CALL_RETURNING_COPY(cc::TrafficSign, GetTriggerVolume))
+      .def("get_stop_waypoints", CALL_RETURNING_LIST(cc::TrafficSign, GetStopWaypoints))
+      .def("get_affected_lane_waypoints", CALL_RETURNING_LIST(cc::TrafficSign, GetAffectedLaneWaypoints))
+      .def("get_opendrive_id", &cc::TrafficSign::GetSignId)
   ;
 
   enum_<cr::TrafficLightState>("TrafficLightState")
@@ -259,24 +270,21 @@ void export_actor() {
       "TrafficLight",
       no_init)
       .add_property("state", &cc::TrafficLight::GetState)
-      .def("set_state", &cc::TrafficLight::SetState, (arg("state")))
+      .def("set_state", CALL_WITHOUT_GIL_1(cc::TrafficLight, SetState, cr::TrafficLightState), (arg("state")))
       .def("get_state", &cc::TrafficLight::GetState)
-      .def("set_green_time", &cc::TrafficLight::SetGreenTime, (arg("green_time")))
+      .def("set_green_time", CALL_WITHOUT_GIL_1(cc::TrafficLight, SetGreenTime, float), (arg("green_time")))
       .def("get_green_time", &cc::TrafficLight::GetGreenTime)
-      .def("set_yellow_time", &cc::TrafficLight::SetYellowTime, (arg("yellow_time")))
+      .def("set_yellow_time", CALL_WITHOUT_GIL_1(cc::TrafficLight, SetYellowTime, float), (arg("yellow_time")))
       .def("get_yellow_time", &cc::TrafficLight::GetYellowTime)
-      .def("set_red_time", &cc::TrafficLight::SetRedTime, (arg("red_time")))
+      .def("set_red_time", CALL_WITHOUT_GIL_1(cc::TrafficLight, SetRedTime, float), (arg("red_time")))
       .def("get_red_time", &cc::TrafficLight::GetRedTime)
       .def("get_elapsed_time", &cc::TrafficLight::GetElapsedTime)
-      .def("freeze", &cc::TrafficLight::Freeze, (arg("freeze")))
+      .def("freeze", CALL_WITHOUT_GIL_1(cc::TrafficLight, Freeze, bool), (arg("freeze")))
       .def("is_frozen", &cc::TrafficLight::IsFrozen)
       .def("get_pole_index", &cc::TrafficLight::GetPoleIndex)
       .def("get_group_traffic_lights", &GetGroupTrafficLights)
-      .def("reset_group", &cc::TrafficLight::ResetGroup)
-      .def("get_affected_lane_waypoints", CALL_RETURNING_LIST(cc::TrafficLight, GetAffectedLaneWaypoints))
+      .def("reset_group", CALL_WITHOUT_GIL(cc::TrafficLight, ResetGroup))
       .def("get_light_boxes", &GetLightBoxes)
-      .def("get_opendrive_id", &cc::TrafficLight::GetOpenDRIVEID)
-      .def("get_stop_waypoints", CALL_RETURNING_LIST(cc::TrafficLight, GetStopWaypoints))
       .def(self_ns::str(self_ns::self))
   ;
 }

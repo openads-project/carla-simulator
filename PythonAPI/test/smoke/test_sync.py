@@ -27,12 +27,11 @@ class TestSynchronousMode(SyncSmokeTest):
             synchronous_mode=True,
             fixed_delta_seconds=0.05)
         for _ in range(0, 4):
-            self.world = self.client.reload_world()
+            self.world = self.reload_world()
             self.world.apply_settings(settings)
-            # workaround: give time to UE4 to clean memory after loading (old assets)
-            time.sleep(5)
 
-    def _test_camera_on_synchronous_mode(self):
+    def test_camera_on_synchronous_mode(self):
+        # Regression test for carla-simulator/carla#9898
         print("TestSynchronousMode.test_camera_on_synchronous_mode")
 
         cam_bp = self.world.get_blueprint_library().find('sensor.camera.rgb')
@@ -54,7 +53,7 @@ class TestSynchronousMode(SyncSmokeTest):
 
                 frame = ts.frame
 
-                image = image_queue.get()
+                image = image_queue.get(True, 10.0)
                 self.assertEqual(image.frame, ts.frame)
                 self.assertEqual(image.timestamp, ts.elapsed_seconds)
 
@@ -68,18 +67,19 @@ class TestSynchronousMode(SyncSmokeTest):
         spawn_points = self.world.get_map().get_spawn_points()
         self.assertNotEqual(len(spawn_points), 0)
 
-        car_bp = bp_lib.find('vehicle.ford.mustang')
+        car_bp = bp_lib.find('vehicle.ue4.ford.mustang')
         car = self.world.spawn_actor(car_bp, spawn_points[0])
-        # List of sensors that are not events, these are retrieved every frame
+        # List of sensors that are not events, these are retrieved every frame.
+        # Cameras included as a regression check for carla-simulator/carla#9898.
         sensor_ids = [
             "sensor.lidar.ray_cast",
             "sensor.lidar.ray_cast_semantic",
             "sensor.other.gnss",
             "sensor.other.radar",
             "sensor.other.imu",
-#            "sensor.camera.rgb",
-#            "sensor.camera.depth",
-#            "sensor.camera.semantic_segmentation"
+            "sensor.camera.rgb",
+            "sensor.camera.depth",
+            "sensor.camera.semantic_segmentation",
             ]
         sensor_bps = [bp_lib.find(n) for n in sensor_ids]
         trans = carla.Transform(carla.Location(x=1.6, z=1.7))
@@ -177,3 +177,28 @@ class TestSynchronousMode(SyncSmokeTest):
 
         a_t0, a_t1 = self.batch_scenario(False, True)
         self.assertEqual(a_t0+1, a_t1, "Something has failed with the apply_batch_sync. These frames should be consecutive: %d %d" % (a_t0, a_t1))
+
+    def test_async_ticks_not_replayed_in_sync(self):
+        # Ticks sent while asynchronous used to be banked on the server and
+        # then run as free frames once synchronous mode was turned on, which
+        # broke deterministic runs on a server that had been used before.
+        print("TestSynchronousMode.test_async_ticks_not_replayed_in_sync")
+        banked = 50
+        self.world.apply_settings(carla.WorldSettings(
+            no_rendering_mode=False,
+            synchronous_mode=False))
+        for _ in range(banked):
+            self.world.tick()
+        frame_async = self.world.get_snapshot().frame
+
+        self.world.apply_settings(carla.WorldSettings(
+            no_rendering_mode=False,
+            synchronous_mode=True,
+            fixed_delta_seconds=0.05))
+        # Nobody ticks: a synchronous server must stay where it is.
+        time.sleep(1.0)
+        advanced = self.world.get_snapshot().frame - frame_async
+        self.assertLess(
+            advanced, banked // 5,
+            "the server ran %d frames after entering synchronous mode with "
+            "no client ticking" % advanced)

@@ -9,14 +9,23 @@
 #include "Carla/Server/CarlaServerResponse.h"
 #include "Carla/Traffic/TrafficLightGroup.h"
 #include "Carla/OpenDrive/OpenDrive.h"
+#include "Carla/OpenDrive/OpenDriveGenerator.h"
 #include "Carla/Util/DebugShapeDrawer.h"
 #include "Carla/Util/NavigationMesh.h"
 #include "Carla/Util/RayTracer.h"
 #include "Carla/Vehicle/CarlaWheeledVehicle.h"
+#include "Carla/Sensor/CustomV2XSensor.h"
+#include "Carla/Sensor/SceneCaptureSensor.h"
+#include "Carla/Sensor/SceneCaptureSensor_WideAngleLens.h"
 #include "Carla/Walker/WalkerController.h"
 #include "Carla/Walker/WalkerBase.h"
+#include "Carla/Weather/SkyLightMap.h"
+#include "Carla/Weather/Weather.h"
+#include "Carla/AI/WalkerAIController.h"
+#include "Carla/Navigation/CarlaNavigationSubsystem.h"
 #include "Carla/Game/Tagger.h"
 #include "Carla/Game/CarlaStatics.h"
+#include "Carla/ContentPacks/ContentPackManager.h"
 #include "Carla/Vehicle/MovementComponents/CarSimManagerComponent.h"
 #include "Carla/Vehicle/MovementComponents/ChronoMovementComponent.h"
 #include "Carla/Lights/CarlaLightSubsystem.h"
@@ -25,11 +34,13 @@
 #include "Carla/Game/CarlaHUD.h"
 #include "Components/SceneComponent.h"
 #include "Components/SkinnedMeshComponent.h"
+#include "ProceduralMeshComponent.h"
 #include "Engine/Engine.h"
 
 #include <util/disable-ue4-macros.h>
 #include <carla/Functional.h>
 #include <carla/multigpu/router.h>
+#include <carla/Sockets.h>
 #include <carla/Version.h>
 #include <carla/rpc/AckermannControllerSettings.h>
 #include <carla/rpc/Actor.h>
@@ -38,6 +49,8 @@
 #include <carla/rpc/BoneTransformDataIn.h>
 #include <carla/rpc/Command.h>
 #include <carla/rpc/CommandResponse.h>
+#include <carla/rpc/ContentPackInfo.h>
+#include <carla/rpc/CustomV2XBytes.h>
 #include <carla/rpc/DebugShape.h>
 #include <carla/rpc/EnvironmentObject.h>
 #include <carla/rpc/EpisodeInfo.h>
@@ -72,6 +85,7 @@
 #include <util/ue-header-guard-begin.h>
 #include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "Misc/App.h"
 #include "Misc/FileHelper.h"
 #include "Animation/PoseSnapshot.h"
 #include <util/ue-header-guard-end.h>
@@ -92,6 +106,79 @@ template <typename T, typename Other>
 static std::vector<T> MakeVectorFromTArray(const TArray<Other> &Array)
 {
   return {Array.GetData(), Array.GetData() + Array.Num()};
+}
+
+static carla::rpc::ContentPackInfo MakeContentPackInfo(const FCarlaContentPack &Pack)
+{
+  carla::rpc::ContentPackInfo Info;
+  Info.name = carla::rpc::FromFString(Pack.GetName());
+  Info.version = carla::rpc::FromFString(Pack.Manifest.Version);
+  Info.base_release = carla::rpc::FromFString(Pack.Manifest.BaseRelease);
+  Info.path = carla::rpc::FromFString(Pack.PackDir);
+  Info.mounted = Pack.bMounted;
+  for (const FCarlaContentPackMap &Map : Pack.Manifest.Maps)
+  {
+    Info.maps.emplace_back(carla::rpc::FromFString(Map.Name));
+  }
+  return Info;
+}
+
+/// True when the stream belongs to a camera and this process has no RHI
+/// (-nullrhi): a local token for it could never deliver a frame, so the
+/// camera must be owned by a rendering Multi-GPU secondary instead.
+static bool IsUnrenderableLocalSensorStream(
+    UCarlaEpisode &Episode,
+    carla::streaming::detail::stream_id_type StreamId)
+{
+  if (FApp::CanEverRender())
+  {
+    return false;
+  }
+  const FCarlaActor *CarlaActor = Episode.FindCarlaActorFromStream(StreamId);
+  if (CarlaActor == nullptr)
+  {
+    return false;
+  }
+  const AActor *Actor = CarlaActor->GetActor();
+  return Actor != nullptr &&
+      (Actor->IsA<ASceneCaptureSensor>() || Actor->IsA<ASceneCaptureSensor_WideAngleLens>());
+}
+
+/// Resolve the AWalkerController behind a walker-navigation RPC actor id.
+/// Accepts either the walker pawn itself or the controller.ai.walker handle
+/// actor (which clients spawn attached to the walker). Returns nullptr for
+/// unknown, dormant or dead actors -- the navigation RPCs answer false in
+/// that case instead of raising, per the phase-1 contract.
+static AWalkerController *ResolveWalkerNavController(FCarlaActor *CarlaActor)
+{
+  if (CarlaActor == nullptr || CarlaActor->IsDormant())
+  {
+    return nullptr;
+  }
+  AActor *Actor = CarlaActor->GetActor();
+  if (Actor == nullptr)
+  {
+    return nullptr;
+  }
+  if (Cast<AWalkerAIController>(Actor) != nullptr)
+  {
+    Actor = Actor->GetAttachParentActor();
+    if (Actor == nullptr)
+    {
+      return nullptr;
+    }
+  }
+  auto *Walker = Cast<AWalkerBase>(Actor);
+  if (Walker != nullptr && !Walker->bAlive)
+  {
+    return nullptr;
+  }
+  auto *Pawn = Cast<APawn>(Actor);
+  if (Pawn == nullptr)
+  {
+    return nullptr;
+  }
+  return Cast<AWalkerController>(Pawn->GetController());
 }
 
 // =============================================================================
@@ -132,6 +219,10 @@ public:
 
   std::atomic_size_t TickCuesReceived { 0u };
 
+  /// Set once, when the engine starts as a Multi-GPU secondary; read by RPC
+  /// handlers, which may already be serving then.
+  std::atomic_bool bIsSecondaryServer { false };
+
 private:
 
   void BindActions();
@@ -165,6 +256,25 @@ private:
     { \
       RESPOND_ERROR("unable to find CARLA game mode"); \
     }
+
+// A Multi-GPU secondary only mirrors the primary: a call that would change its
+// world (or that only the primary can answer) would make it diverge.
+#define REQUIRE_PRIMARY_SERVER() \
+    if (bIsSecondaryServer) \
+    { \
+      RESPOND_ERROR("this is a Multi-GPU secondary server: it mirrors the primary and answers read-only calls only; send this call to the primary server"); \
+    }
+
+static std::vector<std::string> MakeStringVector(const TArray<FString> &Names)
+{
+  std::vector<std::string> Result;
+  Result.reserve(Names.Num());
+  for (const FString &Name : Names)
+  {
+    Result.push_back(TCHAR_TO_UTF8(*Name));
+  }
+  return Result;
+}
 
 carla::rpc::ResponseError RespondError(
     const FString& FuncName,
@@ -273,6 +383,7 @@ void FCarlaServer::FPimpl::BindActions()
   /// Add a new Traffic Manager running on <IP, port>
   BIND_SYNC(add_traffic_manager_running) << [this] (std::pair<std::string, uint16_t> trafficManagerInfo) ->R<bool>
   {
+    REQUIRE_PRIMARY_SERVER();
     uint16_t port = trafficManagerInfo.second;
     auto it = TrafficManagerInfo.find(port);
     if(it == TrafficManagerInfo.end()) {
@@ -286,6 +397,7 @@ void FCarlaServer::FPimpl::BindActions()
 
   BIND_SYNC(destroy_traffic_manager) << [this] (uint16_t port) ->R<bool>
   {
+    REQUIRE_PRIMARY_SERVER();
     auto it = TrafficManagerInfo.find(port);
     if(it != TrafficManagerInfo.end()) {
       TrafficManagerInfo.erase(it);
@@ -303,6 +415,7 @@ void FCarlaServer::FPimpl::BindActions()
 
   BIND_SYNC(tick_cue) << [this]() -> R<uint64_t>
   {
+    REQUIRE_PRIMARY_SERVER();
     TRACE_CPUPROFILER_EVENT_SCOPE(TickCueReceived);
     auto Current = FCarlaEngine::GetFrameCounter();
     (void)TickCuesReceived.fetch_add(1, std::memory_order_release);
@@ -311,8 +424,11 @@ void FCarlaServer::FPimpl::BindActions()
 
   // ~~ Load new episode ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-  BIND_ASYNC(get_available_maps) << [this]() -> R<std::vector<std::string>>
+  // Sync (game thread): the asset registry query behind GetAllMapNames
+  // asserts IsInGameThread, and the content pack list is mutated there.
+  BIND_SYNC(get_available_maps) << [this]() -> R<std::vector<std::string>>
   {
+    CARLA_ENSURE_GAME_THREAD();
     const auto MapNames = UCarlaStatics::GetAllMapNames();
     std::vector<std::string> result;
     result.reserve(MapNames.Num());
@@ -335,6 +451,7 @@ void FCarlaServer::FPimpl::BindActions()
   BIND_SYNC(load_new_episode) << [this](const std::string &map_name, const bool reset_settings, cr::MapLayer MapLayers) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
 
     UCarlaGameInstance* GameInstance = UCarlaStatics::GetGameInstance(Episode->GetWorld());
     if (!GameInstance)
@@ -343,7 +460,11 @@ void FCarlaServer::FPimpl::BindActions()
     }
     GameInstance->SetMapLayer(static_cast<int32>(MapLayers));
 
-    if(!Episode->LoadNewEpisode(cr::ToFString(map_name), reset_settings))
+    // reload_world sends an empty name: reload the current map.
+    const FString MapToLoad = map_name.empty()
+        ? Episode->GetMapName()
+        : cr::ToFString(map_name);
+    if(!Episode->LoadNewEpisode(MapToLoad, reset_settings))
     {
       FString Str(TEXT("Map '"));
       Str += cr::ToFString(map_name);
@@ -354,9 +475,66 @@ void FCarlaServer::FPimpl::BindActions()
     return R<void>::Success();
   };
 
+  // ~~ Content packs ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+  BIND_SYNC(get_content_packs) << [this]() -> R<std::vector<cr::ContentPackInfo>>
+  {
+    CARLA_ENSURE_GAME_THREAD();
+    UCarlaContentPackManager *ContentPacks = UCarlaContentPackManager::Get();
+    if (ContentPacks == nullptr)
+    {
+      RESPOND_ERROR("content pack manager not available");
+    }
+    std::vector<cr::ContentPackInfo> result;
+    for (const FCarlaContentPack &Pack : ContentPacks->GetPacks())
+    {
+      result.emplace_back(MakeContentPackInfo(Pack));
+    }
+    return result;
+  };
+
+  BIND_SYNC(mount_content_pack) << [this](const std::string &path) -> R<cr::ContentPackInfo>
+  {
+    CARLA_ENSURE_GAME_THREAD();
+    UCarlaContentPackManager *ContentPacks = UCarlaContentPackManager::Get();
+    if (ContentPacks == nullptr)
+    {
+      RESPOND_ERROR("content pack manager not available");
+    }
+    FString Error;
+    const FCarlaContentPack *Pack = nullptr;
+    if (!ContentPacks->Mount(cr::ToFString(path), Error, &Pack))
+    {
+      FString Str(TEXT("mount_content_pack: "));
+      Str += Error;
+      RESPOND_ERROR_FSTRING(Str);
+    }
+    return MakeContentPackInfo(*Pack);
+  };
+
+  BIND_SYNC(unmount_content_pack) << [this](const std::string &name) -> R<bool>
+  {
+    REQUIRE_PRIMARY_SERVER();
+    CARLA_ENSURE_GAME_THREAD();
+    UCarlaContentPackManager *ContentPacks = UCarlaContentPackManager::Get();
+    if (ContentPacks == nullptr)
+    {
+      RESPOND_ERROR("content pack manager not available");
+    }
+    FString Error;
+    if (!ContentPacks->Unmount(cr::ToFString(name), Error))
+    {
+      FString Str(TEXT("unmount_content_pack: "));
+      Str += Error;
+      RESPOND_ERROR_FSTRING(Str);
+    }
+    return true;
+  };
+
   BIND_SYNC(load_map_layer) << [this](cr::MapLayer MapLayers) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
 
     ACarlaGameModeBase* GameMode = UCarlaStatics::GetGameMode(Episode->GetWorld());
     if (!GameMode)
@@ -371,6 +549,7 @@ void FCarlaServer::FPimpl::BindActions()
   BIND_SYNC(unload_map_layer) << [this](cr::MapLayer MapLayers) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
 
     ACarlaGameModeBase* GameMode = UCarlaStatics::GetGameMode(Episode->GetWorld());
     if (!GameMode)
@@ -385,6 +564,7 @@ void FCarlaServer::FPimpl::BindActions()
   BIND_SYNC(copy_opendrive_to_file) << [this](const std::string &opendrive, cr::OpendriveGenerationParameters Params) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     if (!Episode->LoadNewOpendriveEpisode(cr::ToLongFString(opendrive), Params))
     {
       RESPOND_ERROR("opendrive could not be correctly parsed");
@@ -398,6 +578,7 @@ void FCarlaServer::FPimpl::BindActions()
     const cr::TextureColor& Texture) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     ::ApplyTextureToActor(Episode, ActorId, MaterialParameter, Texture);
     return R<void>::Success();
   };
@@ -408,6 +589,7 @@ void FCarlaServer::FPimpl::BindActions()
     const cr::TextureFloatColor& Texture) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     ::ApplyTextureToActor(Episode, ActorId, MaterialParameter, Texture);
     return R<void>::Success();
   };
@@ -418,6 +600,7 @@ void FCarlaServer::FPimpl::BindActions()
       const cr::TextureColor& Texture) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     ACarlaGameModeBase* GameMode = UCarlaStatics::GetGameMode(Episode->GetWorld());
     if (!GameMode)
     {
@@ -456,6 +639,7 @@ void FCarlaServer::FPimpl::BindActions()
       const cr::TextureFloatColor& Texture) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     ACarlaGameModeBase* GameMode = UCarlaStatics::GetGameMode(Episode->GetWorld());
     if (!GameMode)
     {
@@ -535,6 +719,14 @@ void FCarlaServer::FPimpl::BindActions()
   BIND_SYNC(get_navigation_mesh) << [this]() -> R<std::vector<uint8_t>>
   {
     REQUIRE_CARLA_EPISODE();
+    // A Multi-GPU secondary builds no navigation mesh for a world generated
+    // from OpenDRIVE; the one in a shared Saved/ folder can be another run's.
+    if (bIsSecondaryServer && Episode->GetMapName().Equals(TEXT("OpenDriveMap"), ESearchCase::IgnoreCase))
+    {
+      return std::vector<uint8_t>{};
+    }
+    // A generated OpenDRIVE world builds its navmesh in the background.
+    UCarlaEpisode::WaitForPendingNavigationBuild(60.0);
     auto FileContents = FNavigationMesh::Load(Episode->GetMapName());
     // make a mem copy (from TArray to std::vector)
     std::vector<uint8_t> Result(FileContents.Num());
@@ -557,15 +749,127 @@ void FCarlaServer::FPimpl::BindActions()
     const auto folderDir = mapDir + "/" + folder.c_str();
     const auto fileName = mapDir.EndsWith(Episode->GetMapName()) ? "*" : Episode->GetMapName();
 
-    // Find all the xodr and bin files from the map
+    // Find all the xodr and bin files from the map. A generated OpenDRIVE
+    // world only ever has current files in Saved/ (see
+    // UCarlaEpisode::LoadNewOpendriveEpisode); copies of OpenDriveMap.* in
+    // the content dir (cooked into the base pak) are stale by construction
+    // and must never be served.
+    const bool bGeneratedWorld = Episode->GetMapName().Equals(TEXT("OpenDriveMap"), ESearchCase::IgnoreCase);
     TArray<FString> Files;
-    IFileManager::Get().FindFilesRecursive(Files, *folderDir, *(fileName + ".xodr"), true, false, false);
-    IFileManager::Get().FindFilesRecursive(Files, *folderDir, *(fileName + ".bin"), true, false, false);
+    if (!bGeneratedWorld)
+    {
+      IFileManager::Get().FindFilesRecursive(Files, *folderDir, *(fileName + ".xodr"), true, false, false);
+      IFileManager::Get().FindFilesRecursive(Files, *folderDir, *(fileName + ".bin"), true, false, false);
+    }
 
-    // Remove the start of the path until the content folder and put each file in the result
+    // Also serve the map's files from its pack's Content/Maps/, unless the base content already has that kind.
+    const UCarlaContentPackManager *MapPacks = UCarlaContentPackManager::Get();
+    if (!bGeneratedWorld && MapPacks != nullptr)
+    {
+      const auto KindOf = [](const FString &InFile, const FString &Root)
+      {
+        FString Relative = FPaths::ConvertRelativePathToFull(InFile);
+        Relative.RemoveFromStart(Root / TEXT(""));
+        FString Kind, Rest;
+        if (!Relative.Split(TEXT("/"), &Kind, &Rest))
+        {
+          Kind.Reset();
+        }
+        return Kind.ToLower() + TEXT("|") + FPaths::GetExtension(InFile).ToLower();
+      };
+      TSet<FString> FoundKinds;
+      for (const FString &File : Files)
+      {
+        FoundKinds.Add(KindOf(File, mapDir));
+      }
+      const FString MapName = Episode->GetMapName();
+      for (const FCarlaContentPack &Pack : MapPacks->GetPacks())
+      {
+        if (!Pack.bMounted || !Pack.Manifest.GetMapNames().Contains(MapName))
+        {
+          continue;
+        }
+        const FString PackMapsDir = Pack.ContentDir / TEXT("Maps");
+        const FString PackFolderDir = PackMapsDir / UTF8_TO_TCHAR(folder.c_str());
+        TArray<FString> PackFiles;
+        IFileManager::Get().FindFilesRecursive(PackFiles, *PackFolderDir, *(MapName + TEXT(".xodr")), true, false, false);
+        IFileManager::Get().FindFilesRecursive(PackFiles, *PackFolderDir, *(MapName + TEXT(".bin")), true, false, false);
+        for (const FString &File : PackFiles)
+        {
+          const FString Kind = KindOf(File, PackMapsDir);
+          if (!FoundKinds.Contains(Kind))
+          {
+            FoundKinds.Add(Kind);
+            Files.Add(File);
+          }
+        }
+      }
+    }
+
+    // Generated OpenDRIVE worlds keep their xodr/nav in Saved/; they are
+    // served under the conventional Carla/Maps/{OpenDrive,Nav}/ names and
+    // filtered by the requested sub-folder like the content walk above.
+    const FString SavedDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir()) / TEXT("");
+    if (bGeneratedWorld)
+    {
+      const FString Folder = UTF8_TO_TCHAR(folder.c_str());
+      const bool bWantXODR = Folder.IsEmpty() || Folder.StartsWith(TEXT("OpenDrive"), ESearchCase::IgnoreCase);
+      const bool bWantNav = Folder.IsEmpty() || Folder.StartsWith(TEXT("Nav"), ESearchCase::IgnoreCase);
+      if (bWantNav)
+      {
+        // The client asks for the navmesh right after load_world; RecastBuilder
+        // may still be running (bounded wait, logs on failure).
+        UCarlaEpisode::WaitForPendingNavigationBuild(60.0);
+      }
+      // Where this server keeps the xodr: a Multi-GPU secondary has its own
+      // folder, and builds no navigation mesh.
+      const FString SavedXODR = UOpenDrive::GetSavedXODRPath(Episode->GetMapName());
+      const FString SavedNav = SavedDir / TEXT("Nav") / (Episode->GetMapName() + TEXT(".bin"));
+      if (bWantXODR && IFileManager::Get().FileExists(*SavedXODR)) Files.Add(SavedXODR);
+      if (bWantNav && !bIsSecondaryServer && IFileManager::Get().FileExists(*SavedNav)) Files.Add(SavedNav);
+    }
+
+    // Remove the start of the path until the content folder and put each file
+    // in the result. In a packaged build the file manager hands back
+    // pak-relative paths ("../../../<Project>/Content/..."), so normalize each
+    // file to an absolute path before stripping the absolute content dir;
+    // otherwise the raw relative path leaks to the client, which would try to
+    // resolve it against its cache folder and escape it. Files of a content
+    // pack are named Packs/<Pack>/<path under its Content dir>.
+    // Every prefix carries a trailing '/', so a sibling dir such as
+    // "ContentBackup" can never match.
+    const FString ContentDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir()) / TEXT("");
+    const UCarlaContentPackManager *ContentPacks = UCarlaContentPackManager::Get();
     std::vector<std::string> result;
     for (auto File : Files) {
-      File.RemoveFromStart(FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir()));
+      File = FPaths::ConvertRelativePathToFull(File);
+      if (File.StartsWith(SavedDir) && File.EndsWith(TEXT(".xodr")))
+      {
+        // Under its conventional name, whatever folder this server keeps it in.
+        File = TEXT("Carla/Maps/OpenDrive") / FPaths::GetCleanFilename(File);
+      }
+      else if (File.StartsWith(SavedDir))
+      {
+        File.RemoveFromStart(SavedDir);
+        File = TEXT("Carla/Maps") / File;
+      }
+      else if (File.StartsWith(ContentDir))
+      {
+        File.RemoveFromStart(ContentDir);
+      }
+      else if (ContentPacks != nullptr)
+      {
+        for (const FCarlaContentPack &Pack : ContentPacks->GetPacks())
+        {
+          const FString PackContentDir = Pack.ContentDir / TEXT("");
+          if (Pack.bMounted && File.StartsWith(PackContentDir))
+          {
+            File.RemoveFromStart(PackContentDir);
+            File = FString::Printf(TEXT("Packs/%s"), *Pack.GetName()) / File;
+            break;
+          }
+        }
+      }
       result.emplace_back(TCHAR_TO_UTF8(*File));
     }
 
@@ -575,9 +879,63 @@ void FCarlaServer::FPimpl::BindActions()
   {
     REQUIRE_CARLA_EPISODE();
 
-    // Get the absolute path of the file
-    FString path(FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir()));
+    // Get the absolute path of the file, refusing names that escape the
+    // content folder: the name comes from the client, and ".." segments would
+    // otherwise let it read arbitrary files on the server host.
+    const FString ContentDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir());
+    FString path = ContentDir;
     path.Append(name.c_str());
+    path = FPaths::ConvertRelativePathToFull(path);
+    if (!path.StartsWith(ContentDir))
+    {
+      RESPOND_ERROR("file requested outside the content folder");
+    }
+
+    // Names produced by get_required_files for a content pack
+    // (Packs/<Pack>/...) resolve inside that pack's Content dir. The
+    // generated OpenDRIVE world's files (Carla/Maps/{OpenDrive,Nav}/...) are
+    // served from Saved/ whenever a copy exists there: the content-dir copy
+    // cooked into the base pak is stale by construction.
+    {
+      FString Rest = path;
+      Rest.RemoveFromStart(ContentDir);
+      FString PackName, PackRelative;
+      FString SavedRelative = Rest;
+      if (Rest.RemoveFromStart(TEXT("Packs/")) && Rest.Split(TEXT("/"), &PackName, &PackRelative))
+      {
+        const UCarlaContentPackManager *ContentPacks = UCarlaContentPackManager::Get();
+        const FCarlaContentPack *Pack = ContentPacks ? ContentPacks->FindPack(PackName) : nullptr;
+        if (Pack != nullptr && Pack->bMounted)
+        {
+          const FString PackContentDir = Pack->ContentDir / TEXT("");
+          const FString PackPath = FPaths::ConvertRelativePathToFull(PackContentDir / PackRelative);
+          if (!PackPath.StartsWith(PackContentDir))
+          {
+            RESPOND_ERROR("file requested outside the content pack folder");
+          }
+          path = PackPath;
+        }
+      }
+      else if (SavedRelative.RemoveFromStart(TEXT("Carla/Maps/")) &&
+               (SavedRelative.StartsWith(TEXT("OpenDrive/")) || SavedRelative.StartsWith(TEXT("Nav/"))))
+      {
+        const FString SavedDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir()) / TEXT("");
+        // The xodr from where this server keeps it (a Multi-GPU secondary has
+        // a folder of its own); a secondary builds no navigation mesh, and the
+        // one in a shared Saved/ folder can be another run's.
+        const bool bOwnXODR = bIsSecondaryServer &&
+            (FPaths::GetPath(SavedRelative) == TEXT("OpenDrive")) &&
+            FPaths::GetExtension(SavedRelative).Equals(TEXT("xodr"), ESearchCase::IgnoreCase);
+        const FString SavedPath = bOwnXODR ?
+            UOpenDrive::GetSavedXODRPath(FPaths::GetBaseFilename(SavedRelative)) :
+            FPaths::ConvertRelativePathToFull(SavedDir / SavedRelative);
+        if (SavedPath.StartsWith(SavedDir) && IFileManager::Get().FileExists(*SavedPath) &&
+            !(bIsSecondaryServer && SavedRelative.StartsWith(TEXT("Nav/"))))
+        {
+          path = SavedPath;
+        }
+      }
+    }
 
     // Copy the binary data of the file into the result and return it
     TArray<uint8_t> Content;
@@ -598,6 +956,7 @@ void FCarlaServer::FPimpl::BindActions()
       const cr::EpisodeSettings &settings) -> R<uint64_t>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     Episode->ApplySettings(settings);
     StreamingServer.SetSynchronousMode(settings.synchronous_mode);
 
@@ -610,6 +969,12 @@ void FCarlaServer::FPimpl::BindActions()
     if (LargeMap)
     {
       LargeMap->ConsiderSpectatorAsEgo(settings.spectator_as_ego);
+    }
+
+    if (ATrafficLightManager* TrafficLightManager = GameMode->GetTrafficLightManager())
+    {
+      TrafficLightManager->SetAdjustSignsHeightToGround(
+          settings.adjust_signs_height_to_ground);
     }
 
     return FCarlaEngine::GetFrameCounter();
@@ -676,6 +1041,7 @@ void FCarlaServer::FPimpl::BindActions()
   BIND_SYNC(enable_environment_objects) << [this](std::vector<uint64_t> EnvObjectIds, bool Enable) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     ACarlaGameModeBase* GameMode = UCarlaStatics::GetGameMode(Episode->GetWorld());
     if (!GameMode)
     {
@@ -710,6 +1076,7 @@ void FCarlaServer::FPimpl::BindActions()
       const cr::WeatherParameters &weather) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     auto *Weather = Episode->GetWeather();
     if (Weather == nullptr)
     {
@@ -717,6 +1084,49 @@ void FCarlaServer::FPimpl::BindActions()
     }
     Weather->ApplyWeather(weather);
     return R<void>::Success();
+  };
+
+  // Environment map for the sky light: an equirectangular linear RGB(A) float
+  // panorama in the CARLA world frame (see Weather/SkyLightMap.h for the
+  // column/row convention) becomes a transient HDR cubemap on the rig's sky
+  // light, replacing the real-time atmosphere capture until cleared.
+  BIND_SYNC(set_sky_light_map) << [this](
+      const cr::TextureFloatColor &panorama, float intensity, int32_t face_size) -> R<void>
+  {
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    if (panorama.GetWidth() < 2 || panorama.GetHeight() < 2)
+    {
+      RESPOND_ERROR("set_sky_light_map: panorama must be at least 2x2");
+    }
+    static_assert(sizeof(cr::FloatColor) == 4 * sizeof(float), "FloatColor must be 4 packed floats");
+    UTextureCube* Cubemap = CarlaSkyLightMap::CreateCubemapFromEquirect(
+        reinterpret_cast<const float*>(panorama.GetDataPtr()),
+        int32(panorama.GetWidth()), int32(panorama.GetHeight()),
+        face_size > 0 ? face_size : 512);
+    if (Cubemap == nullptr)
+    {
+      RESPOND_ERROR("set_sky_light_map: could not build the cubemap");
+    }
+    if (!AWeather::SetSkyLightMap(Episode->GetWorld(), Cubemap, intensity))
+    {
+      RESPOND_ERROR("set_sky_light_map: no sky rig (ASkyBase) in the level");
+    }
+    return R<void>::Success();
+  };
+
+  BIND_SYNC(clear_sky_light_map) << [this]() -> R<void>
+  {
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    AWeather::ClearSkyLightMap(Episode->GetWorld());
+    return R<void>::Success();
+  };
+
+  BIND_SYNC(has_sky_light_map) << [this]() -> R<bool>
+  {
+    REQUIRE_CARLA_EPISODE();
+    return AWeather::HasSkyLightMap();
   };
 
   // ~~ IMU gravity ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -731,6 +1141,7 @@ void FCarlaServer::FPimpl::BindActions()
   BIND_SYNC(set_imu_gravity) << [this](float new_imu_gravity) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     REQUIRE_CARLA_GAME_MODE()
     GameMode->IMUSensorGravity = new_imu_gravity;
     return R<void>::Success();
@@ -745,6 +1156,46 @@ void FCarlaServer::FPimpl::BindActions()
       return false;
     }
     return true;
+  };
+
+  // ~~ ROS2 TF ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+  BIND_SYNC(set_publish_tf) << [this](bool publish_tf) -> R<void>
+  {
+    #if defined(WITH_ROS2)
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    auto ROS2 = carla::ros2::ROS2::GetInstance();
+    if (ROS2 && ROS2->IsEnabled()) {
+      ROS2->SetPublishTF(publish_tf);
+      return R<void>::Success();
+    }
+    RESPOND_ERROR("set_publish_tf: ROS2 is not enabled");
+    #else
+    RESPOND_ERROR("set_publish_tf: Server was compiled without ROS2 support");
+    #endif
+  };
+
+  BIND_SYNC(get_publish_tf) << [this]() -> R<bool>
+  {
+    #if defined(WITH_ROS2)
+    REQUIRE_CARLA_EPISODE();
+    auto ROS2 = carla::ros2::ROS2::GetInstance();
+    if (ROS2 && ROS2->IsEnabled()) {
+      return ROS2->GetPublishTF();
+    }
+    return false;
+    #else
+    return false;
+    #endif
+  };
+
+  BIND_SYNC(get_ego_spawn_points) << [this]() -> R<std::vector<carla::geom::Transform>>
+  {
+    REQUIRE_CARLA_EPISODE();
+    const auto &SpawnPoints = Episode->GetRecommendedSpawnPoints();
+    auto result = MakeVectorFromTArray<cg::Transform>(SpawnPoints);
+    return result;
   };
 
   // ~~ Actor operations ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -771,6 +1222,7 @@ void FCarlaServer::FPimpl::BindActions()
       const cr::Transform &Transform) -> R<cr::Actor>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
 
     auto Result = Episode->SpawnActorWithInfo(Transform, std::move(Description));
 
@@ -786,7 +1238,11 @@ void FCarlaServer::FPimpl::BindActions()
       LargeMap->OnActorSpawned(*Result.Value);
     }
 
-    return Episode->SerializeActor(Result.Value);
+    cr::Actor SerializedActor = Episode->SerializeActor(Result.Value);
+    // RPCs run before the frame counter advances, so the next snapshot is the
+    // first one that can contain this actor.
+    SerializedActor.spawn_frame = FCarlaEngine::GetFrameCounter();
+    return SerializedActor;
   };
 
   BIND_SYNC(spawn_actor_with_parent) << [this](
@@ -796,6 +1252,7 @@ void FCarlaServer::FPimpl::BindActions()
       cr::AttachmentType InAttachmentType) -> R<cr::Actor>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
 
     auto Result = Episode->SpawnActorWithInfo(Transform, std::move(Description));
     if (Result.Key != EActorSpawnResultStatus::Success)
@@ -820,25 +1277,7 @@ void FCarlaServer::FPimpl::BindActions()
     CarlaActor->SetAttachmentType(InAttachmentType);
     ParentCarlaActor->AddChildren(CarlaActor->GetActorId());
 
-    #if defined(WITH_ROS2)
-    auto ROS2 = carla::ros2::ROS2::GetInstance();
-    if (ROS2->IsEnabled())
-    {
-      FCarlaActor* CurrentActor = ParentCarlaActor;
-      while(CurrentActor)
-      {
-        for (const auto &Attr : CurrentActor->GetActorInfo()->Description.Variations)
-        {
-          if (Attr.Key == "ros_name")
-          {
-            const std::string value = std::string(TCHAR_TO_UTF8(*Attr.Value.Value));
-            ROS2->AddActorParentRosName(static_cast<void*>(CarlaActor->GetActor()), static_cast<void*>(CurrentActor->GetActor()));
-          }
-        }
-        CurrentActor = Episode->FindCarlaActor(CurrentActor->GetParent());
-      }
-    }
-    #endif
+    Episode->AddRosParentNames(*CarlaActor);
 
     // Only is possible to attach if the actor has been really spawned and
     // is not in dormant state
@@ -854,18 +1293,27 @@ void FCarlaServer::FPimpl::BindActions()
       Episode->PutActorToSleep(CarlaActor->GetActorId());
     }
 
-    return Episode->SerializeActor(CarlaActor);
+    cr::Actor SerializedActor = Episode->SerializeActor(CarlaActor);
+    SerializedActor.spawn_frame = FCarlaEngine::GetFrameCounter();
+    return SerializedActor;
   };
 
   BIND_SYNC(destroy_actor) << [this](cr::ActorId ActorId) -> R<bool>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if ( !CarlaActor )
     {
       RESPOND_ERROR("unable to destroy actor: not found");
     }
     UE_LOG(LogCarla, Log, TEXT("CarlaServer destroy_actor %d"), ActorId);
+    std::optional<carla::streaming::detail::stream_id_type> SensorStreamId;
+    const ASensor *Sensor = Cast<ASensor>(CarlaActor->GetActor());
+    if (Sensor != nullptr && Episode->bIsPrimaryServer)
+    {
+      SensorStreamId = carla::streaming::detail::token_type(Sensor->GetToken()).get_stream_id();
+    }
     // We need to force the actor state change, since dormant actors
     //  will ignore the FCarlaActor destruction
     CarlaActor->SetActorState(cr::ActorState::PendingKill);
@@ -873,12 +1321,17 @@ void FCarlaServer::FPimpl::BindActions()
     {
       RESPOND_ERROR("internal error: unable to destroy actor");
     }
+    if (SensorStreamId && SecondaryServer)
+    {
+      SecondaryServer->GetCommander().ForgetSensor(*SensorStreamId);
+    }
     return true;
   };
 
   BIND_SYNC(console_command) << [this](std::string cmd) -> R<bool>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     APlayerController* PController= UGameplayStatics::GetPlayerController(Episode->GetWorld(), 0);
     if( PController )
     {
@@ -907,9 +1360,26 @@ void FCarlaServer::FPimpl::BindActions()
       ForceInPrimary = true;
     }
 
+    // A Multi-GPU secondary serves its own world snapshots, which every client
+    // of it subscribes to in get_world(); the sensor streams are the primary's
+    // to route.
+    const bool bOwnWorldObserver = (sensor_id ==
+        carla::streaming::detail::token_type(BroadcastStream.token()).get_stream_id());
+    if (!bOwnWorldObserver)
+    {
+      REQUIRE_PRIMARY_SERVER();
+    }
+
     // collision sensor always in primary server in multi-gpu
     FString Desc = Episode->GetActorDescriptionFromStream(sensor_id);
     if (Desc == "" || Desc == "sensor.other.collision")
+    {
+      ForceInPrimary = true;
+    }
+
+    // V2X sensors too: they exchange messages between the primary's own
+    // actors and keep per-process state, so a mirror could never match them.
+    if (Desc == "sensor.other.v2x" || Desc == "sensor.other.v2x_custom")
     {
       ForceInPrimary = true;
     }
@@ -918,11 +1388,28 @@ void FCarlaServer::FPimpl::BindActions()
     {
       // multi-gpu
       UE_LOG(LogCarla, Log, TEXT("Sensor %d '%s' created in secondary server"), sensor_id, *Desc);
-      return SecondaryServer->GetCommander().GetToken(sensor_id);
+      const FCarlaActor *SensorActor = Episode->FindCarlaActorFromStream(sensor_id);
+      if (SensorActor == nullptr)
+      {
+        RESPOND_ERROR("sensor stream has no actor");
+      }
+      auto Token = SecondaryServer->GetCommander().GetToken(sensor_id, SensorActor->GetActorId());
+      if (!Token)
+      {
+        RESPOND_ERROR("no secondary server could provide a token for this sensor");
+      }
+      return *Token;
     }
     else
     {
       // single-gpu
+      if (IsUnrenderableLocalSensorStream(*Episode, sensor_id))
+      {
+        UE_LOG(LogCarla, Warning,
+            TEXT("Sensor %d '%s' refused: this server cannot render (-nullrhi) and no secondary server is connected"),
+            sensor_id, *Desc);
+        RESPOND_ERROR("this server cannot render (-nullrhi) and no rendering secondary server is connected to own this camera sensor");
+      }
       UE_LOG(LogCarla, Log, TEXT("Sensor %d '%s' created in primary server"), sensor_id, *Desc);
       return StreamingServer.GetToken(sensor_id);
     }
@@ -932,6 +1419,7 @@ void FCarlaServer::FPimpl::BindActions()
                                  R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     bool ForceInPrimary = false;
 
     // check for the world observer (always in primary server)
@@ -950,11 +1438,26 @@ void FCarlaServer::FPimpl::BindActions()
     if (SecondaryServer->HasClientsConnected() && !ForceInPrimary)
     {
       // multi-gpu
-      SecondaryServer->GetCommander().EnableForROS(sensor_id);
+      const FCarlaActor *SensorActor = Episode->FindCarlaActorFromStream(sensor_id);
+      if (SensorActor == nullptr)
+      {
+        RESPOND_ERROR("sensor stream has no actor");
+      }
+      if (!SecondaryServer->GetCommander().EnableForROS(sensor_id, SensorActor->GetActorId()))
+      {
+        RESPOND_ERROR("no secondary server could enable ROS for this sensor");
+      }
     }
     else
     {
       // single-gpu
+      if (IsUnrenderableLocalSensorStream(*Episode, sensor_id))
+      {
+        UE_LOG(LogCarla, Warning,
+            TEXT("ROS 2 for sensor %d '%s' refused: this server cannot render (-nullrhi) and no secondary server is connected"),
+            sensor_id, *Desc);
+        RESPOND_ERROR("this server cannot render (-nullrhi) and no rendering secondary server is connected to publish this camera sensor");
+      }
       StreamingServer.EnableForROS(sensor_id);
     }
     return R<void>::Success();
@@ -964,6 +1467,7 @@ void FCarlaServer::FPimpl::BindActions()
                                  R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     bool ForceInPrimary = false;
 
     // check for the world observer (always in primary server)
@@ -1023,6 +1527,41 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
     }
   };
 
+  BIND_SYNC(send) << [this](
+      cr::ActorId ActorId,
+      cr::CustomV2XBytes Data) -> R<void>
+  {
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
+    if (!CarlaActor)
+    {
+      return RespondError(
+          "send",
+          ECarlaServerResponse::ActorNotFound,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+
+    if (CarlaActor->IsDormant())
+    {
+      return RespondError(
+          "send",
+          ECarlaServerResponse::FunctionNotAvailableWhenDormant,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+    ACustomV2XSensor* Sensor = Cast<ACustomV2XSensor>(CarlaActor->GetActor());
+    if (!Sensor)
+    {
+      return RespondError(
+        "send",
+        ECarlaServerResponse::ActorTypeMismatch,
+        " Actor Id: " + FString::FromInt(ActorId));
+    }
+
+    Sensor->Send(Data);
+    return R<void>::Success();
+  };
+
   // ~~ Actor physics ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
   BIND_SYNC(set_actor_location) << [this](
@@ -1030,6 +1569,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::Location Location) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1049,6 +1589,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::Transform Transform) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1069,6 +1610,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       float Speed) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1099,6 +1641,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::Vector3D vector) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1124,6 +1667,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::Vector3D vector) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1149,6 +1693,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::Vector3D vector) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1175,6 +1720,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::ActorId ActorId) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1197,11 +1743,67 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
     return R<void>::Success();
   };
 
+  BIND_SYNC(enable_actor_constant_acceleration) << [this](
+      cr::ActorId ActorId,
+      cr::Vector3D vector) -> R<void>
+  {
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
+    if (!CarlaActor)
+    {
+      return RespondError(
+          "enable_actor_constant_acceleration",
+          ECarlaServerResponse::ActorNotFound,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+
+    ECarlaServerResponse Response =
+        CarlaActor->EnableActorConstantAcceleration(vector.ToCentimeters().ToFVector());
+    if (Response != ECarlaServerResponse::Success)
+    {
+      return RespondError(
+          "enable_actor_constant_acceleration",
+          Response,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+
+    return R<void>::Success();
+  };
+
+  BIND_SYNC(disable_actor_constant_acceleration) << [this](
+      cr::ActorId ActorId) -> R<void>
+  {
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
+    if (!CarlaActor)
+    {
+      return RespondError(
+          "disable_actor_constant_acceleration",
+          ECarlaServerResponse::ActorNotFound,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+
+    ECarlaServerResponse Response =
+        CarlaActor->DisableActorConstantAcceleration();
+    if (Response != ECarlaServerResponse::Success)
+    {
+      return RespondError(
+          "disable_actor_constant_acceleration",
+          Response,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+
+    return R<void>::Success();
+  };
+
   BIND_SYNC(add_actor_impulse) << [this](
       cr::ActorId ActorId,
       cr::Vector3D vector) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1229,6 +1831,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::Vector3D location) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1262,6 +1865,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::Vector3D vector) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1288,6 +1892,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::Vector3D location) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1320,6 +1925,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::Vector3D vector) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1345,6 +1951,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::Vector3D vector) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1379,23 +1986,17 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
           " Actor Id: " + FString::FromInt(ActorId));
     }
 
-    TArray<UActorComponent*> Components;
-    CarlaActor->GetActor()->GetComponents(Components);
     const FString TargetName(UTF8_TO_TCHAR(component_name.c_str()));
-
-    for (UActorComponent* ActorComponent : Components)
+    FTransform Transform;
+    ECarlaServerResponse Response = CarlaActor->GetActorComponentWorldTransform(TargetName, Transform);
+    if (Response != ECarlaServerResponse::Success)
     {
-      USceneComponent* SceneComponent = Cast<USceneComponent>(ActorComponent);
-      if (SceneComponent != nullptr && SceneComponent->GetName() == TargetName)
-      {
-        return cr::Transform(SceneComponent->GetComponentTransform());
-      }
+      return RespondError(
+          "get_actor_component_world_transform",
+          Response,
+          " Component Name: " + TargetName);
     }
-
-    return RespondError(
-        "get_actor_component_world_transform",
-        ECarlaServerResponse::ComponentNotFound,
-        " Component Name: " + TargetName);
+    return cr::Transform(Transform);
   };
 
   BIND_SYNC(get_actor_component_relative_transform) << [this](
@@ -1412,23 +2013,17 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
           " Actor Id: " + FString::FromInt(ActorId));
     }
 
-    TArray<UActorComponent*> Components;
-    CarlaActor->GetActor()->GetComponents(Components);
     const FString TargetName(UTF8_TO_TCHAR(component_name.c_str()));
-
-    for (UActorComponent* ActorComponent : Components)
+    FTransform Transform;
+    ECarlaServerResponse Response = CarlaActor->GetActorComponentRelativeTransform(TargetName, Transform);
+    if (Response != ECarlaServerResponse::Success)
     {
-      USceneComponent* SceneComponent = Cast<USceneComponent>(ActorComponent);
-      if (SceneComponent != nullptr && SceneComponent->GetName() == TargetName)
-      {
-        return cr::Transform(SceneComponent->GetRelativeTransform());
-      }
+      return RespondError(
+          "get_actor_component_relative_transform",
+          Response,
+          " Component Name: " + TargetName);
     }
-
-    return RespondError(
-        "get_actor_component_relative_transform",
-        ECarlaServerResponse::ComponentNotFound,
-        " Component Name: " + TargetName);
+    return cr::Transform(Transform);
   };
 
   BIND_SYNC(get_actor_bone_world_transforms) << [this](
@@ -1444,28 +2039,16 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
           " Actor Id: " + FString::FromInt(ActorId));
     }
 
-    TArray<USkinnedMeshComponent*> SkinnedMeshComponents;
-    CarlaActor->GetActor()->GetComponents<USkinnedMeshComponent>(SkinnedMeshComponents);
-    if (SkinnedMeshComponents.Num() == 0)
+    TArray<FTransform> Transforms;
+    ECarlaServerResponse Response = CarlaActor->GetActorBoneWorldTransforms(Transforms);
+    if (Response != ECarlaServerResponse::Success)
     {
       return RespondError(
           "get_actor_bone_world_transforms",
-          ECarlaServerResponse::ComponentNotFound,
-          TEXT(" Component Name: SkinnedMeshComponent"));
+          Response,
+          " Actor Id: " + FString::FromInt(ActorId));
     }
-
-    TArray<FTransform> BoneWorldTransforms;
-    for (USkinnedMeshComponent* SkinnedMeshComponent : SkinnedMeshComponents)
-    {
-      const FTransform WorldTransform = SkinnedMeshComponent->GetComponentTransform();
-      const int32 NumBones = SkinnedMeshComponent->GetNumBones();
-      for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
-      {
-        BoneWorldTransforms.Add(
-            SkinnedMeshComponent->GetBoneTransform(BoneIndex, WorldTransform));
-      }
-    }
-    return MakeVectorFromTArray<cr::Transform>(BoneWorldTransforms);
+    return MakeVectorFromTArray<cr::Transform>(Transforms);
   };
 
   BIND_SYNC(get_actor_bone_relative_transforms) << [this](
@@ -1481,27 +2064,16 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
           " Actor Id: " + FString::FromInt(ActorId));
     }
 
-    TArray<USkinnedMeshComponent*> SkinnedMeshComponents;
-    CarlaActor->GetActor()->GetComponents<USkinnedMeshComponent>(SkinnedMeshComponents);
-    if (SkinnedMeshComponents.Num() == 0)
+    TArray<FTransform> Transforms;
+    ECarlaServerResponse Response = CarlaActor->GetActorBoneRelativeTransforms(Transforms);
+    if (Response != ECarlaServerResponse::Success)
     {
       return RespondError(
           "get_actor_bone_relative_transforms",
-          ECarlaServerResponse::ComponentNotFound,
-          TEXT(" Component Name: SkinnedMeshComponent"));
+          Response,
+          " Actor Id: " + FString::FromInt(ActorId));
     }
-
-    TArray<FTransform> BoneRelativeTransforms;
-    for (USkinnedMeshComponent* SkinnedMeshComponent : SkinnedMeshComponents)
-    {
-      const int32 NumBones = SkinnedMeshComponent->GetNumBones();
-      for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
-      {
-        BoneRelativeTransforms.Add(
-            SkinnedMeshComponent->GetBoneTransform(BoneIndex, FTransform::Identity));
-      }
-    }
-    return MakeVectorFromTArray<cr::Transform>(BoneRelativeTransforms);
+    return MakeVectorFromTArray<cr::Transform>(Transforms);
   };
 
   BIND_SYNC(get_actor_component_names) << [this](
@@ -1517,15 +2089,16 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
           " Actor Id: " + FString::FromInt(ActorId));
     }
 
-    TArray<UActorComponent*> Components;
-    CarlaActor->GetActor()->GetComponents(Components);
-    std::vector<std::string> ComponentNames;
-    ComponentNames.reserve(Components.Num());
-    for (UActorComponent* ActorComponent : Components)
+    TArray<FString> Names;
+    ECarlaServerResponse Response = CarlaActor->GetActorComponentNames(Names);
+    if (Response != ECarlaServerResponse::Success)
     {
-      ComponentNames.push_back(TCHAR_TO_UTF8(*ActorComponent->GetName()));
+      return RespondError(
+          "get_actor_component_names",
+          Response,
+          " Actor Id: " + FString::FromInt(ActorId));
     }
-    return ComponentNames;
+    return MakeStringVector(Names);
   };
 
   BIND_SYNC(get_actor_bone_names) << [this](
@@ -1541,25 +2114,16 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
           " Actor Id: " + FString::FromInt(ActorId));
     }
 
-    USkinnedMeshComponent* SkinnedMeshComponent =
-        CarlaActor->GetActor()->FindComponentByClass<USkinnedMeshComponent>();
-    if (SkinnedMeshComponent == nullptr)
+    TArray<FString> Names;
+    ECarlaServerResponse Response = CarlaActor->GetActorBoneNames(Names);
+    if (Response != ECarlaServerResponse::Success)
     {
       return RespondError(
           "get_actor_bone_names",
-          ECarlaServerResponse::ComponentNotFound,
-          TEXT(" Component Name: SkinnedMeshComponent"));
+          Response,
+          " Actor Id: " + FString::FromInt(ActorId));
     }
-
-    TArray<FName> BoneNames;
-    SkinnedMeshComponent->GetBoneNames(BoneNames);
-    std::vector<std::string> StringBoneNames;
-    StringBoneNames.reserve(BoneNames.Num());
-    for (const FName &Name : BoneNames)
-    {
-      StringBoneNames.push_back(TCHAR_TO_UTF8(*Name.ToString()));
-    }
-    return StringBoneNames;
+    return MakeStringVector(Names);
   };
 
   BIND_SYNC(get_actor_socket_world_transforms) << [this](
@@ -1575,22 +2139,16 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
           " Actor Id: " + FString::FromInt(ActorId));
     }
 
-    TArray<FTransform> SocketWorldTransforms;
-    TArray<UActorComponent*> Components;
-    CarlaActor->GetActor()->GetComponents(Components);
-    for (UActorComponent* ActorComponent : Components)
+    TArray<FTransform> Transforms;
+    ECarlaServerResponse Response = CarlaActor->GetActorSocketWorldTransforms(Transforms);
+    if (Response != ECarlaServerResponse::Success)
     {
-      USceneComponent* SceneComponent = Cast<USceneComponent>(ActorComponent);
-      if (SceneComponent == nullptr)
-      {
-        continue;
-      }
-      for (const FName &SocketName : SceneComponent->GetAllSocketNames())
-      {
-        SocketWorldTransforms.Add(SceneComponent->GetSocketTransform(SocketName));
-      }
+      return RespondError(
+          "get_actor_socket_world_transforms",
+          Response,
+          " Actor Id: " + FString::FromInt(ActorId));
     }
-    return MakeVectorFromTArray<cr::Transform>(SocketWorldTransforms);
+    return MakeVectorFromTArray<cr::Transform>(Transforms);
   };
 
   BIND_SYNC(get_actor_socket_relative_transforms) << [this](
@@ -1606,23 +2164,16 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
           " Actor Id: " + FString::FromInt(ActorId));
     }
 
-    TArray<FTransform> SocketRelativeTransforms;
-    TArray<UActorComponent*> Components;
-    CarlaActor->GetActor()->GetComponents(Components);
-    for (UActorComponent* ActorComponent : Components)
+    TArray<FTransform> Transforms;
+    ECarlaServerResponse Response = CarlaActor->GetActorSocketRelativeTransforms(Transforms);
+    if (Response != ECarlaServerResponse::Success)
     {
-      USceneComponent* SceneComponent = Cast<USceneComponent>(ActorComponent);
-      if (SceneComponent == nullptr)
-      {
-        continue;
-      }
-      for (const FName &SocketName : SceneComponent->GetAllSocketNames())
-      {
-        SocketRelativeTransforms.Add(
-            SceneComponent->GetSocketTransform(SocketName, ERelativeTransformSpace::RTS_Actor));
-      }
+      return RespondError(
+          "get_actor_socket_relative_transforms",
+          Response,
+          " Actor Id: " + FString::FromInt(ActorId));
     }
-    return MakeVectorFromTArray<cr::Transform>(SocketRelativeTransforms);
+    return MakeVectorFromTArray<cr::Transform>(Transforms);
   };
 
   BIND_SYNC(get_actor_socket_names) << [this](
@@ -1638,22 +2189,16 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
           " Actor Id: " + FString::FromInt(ActorId));
     }
 
-    std::vector<std::string> StringSocketNames;
-    TArray<UActorComponent*> Components;
-    CarlaActor->GetActor()->GetComponents(Components);
-    for (UActorComponent* ActorComponent : Components)
+    TArray<FString> Names;
+    ECarlaServerResponse Response = CarlaActor->GetActorSocketNames(Names);
+    if (Response != ECarlaServerResponse::Success)
     {
-      USceneComponent* SceneComponent = Cast<USceneComponent>(ActorComponent);
-      if (SceneComponent == nullptr)
-      {
-        continue;
-      }
-      for (const FName &Name : SceneComponent->GetAllSocketNames())
-      {
-        StringSocketNames.push_back(TCHAR_TO_UTF8(*Name.ToString()));
-      }
+      return RespondError(
+          "get_actor_socket_names",
+          Response,
+          " Actor Id: " + FString::FromInt(ActorId));
     }
-    return StringSocketNames;
+    return MakeStringVector(Names);
   };
 
   BIND_SYNC(get_physics_control) << [this](
@@ -1685,6 +2230,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::ActorId ActorId) -> R<cr::VehicleTelemetryData>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1736,6 +2282,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::VehiclePhysicsControl PhysicsControl) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1761,6 +2308,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::VehicleLightState LightState) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1787,6 +2335,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::VehicleDoor DoorIdx) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1812,6 +2361,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::VehicleDoor DoorIdx) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1838,6 +2388,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
     float AngleInDeg) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if(!CarlaActor){
       return RespondError(
@@ -1884,11 +2435,142 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
     return Angle;
   };
 
+  BIND_SYNC(set_wheel_pitch_angle) << [this](
+    cr::ActorId ActorId,
+    cr::VehicleWheelLocation WheelLocation,
+    float AngleInDeg) -> R<void>
+  {
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
+    if(!CarlaActor){
+      return RespondError(
+          "set_wheel_pitch_angle",
+          ECarlaServerResponse::ActorNotFound,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+    ECarlaServerResponse Response =
+        CarlaActor->SetWheelPitchAngle(
+            static_cast<EVehicleWheelLocation>(WheelLocation), AngleInDeg);
+    if (Response != ECarlaServerResponse::Success)
+    {
+      return RespondError(
+          "set_wheel_pitch_angle",
+          Response,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+    return R<void>::Success();
+  };
+
+  BIND_SYNC(get_wheel_pitch_angle) << [this](
+      const cr::ActorId ActorId,
+      cr::VehicleWheelLocation WheelLocation) -> R<float>
+  {
+    REQUIRE_CARLA_EPISODE();
+    FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
+    if(!CarlaActor){
+      return RespondError(
+          "get_wheel_pitch_angle",
+          ECarlaServerResponse::ActorNotFound,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+    float Value;
+    ECarlaServerResponse Response =
+        CarlaActor->GetWheelPitchAngle(
+            static_cast<EVehicleWheelLocation>(WheelLocation), Value);
+    if (Response != ECarlaServerResponse::Success)
+    {
+      return RespondError(
+          "get_wheel_pitch_angle",
+          Response,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+    return Value;
+  };
+
+  BIND_SYNC(set_wheel_suspension_offset) << [this](
+    cr::ActorId ActorId,
+    cr::VehicleWheelLocation WheelLocation,
+    float Offset) -> R<void>
+  {
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
+    if(!CarlaActor){
+      return RespondError(
+          "set_wheel_suspension_offset",
+          ECarlaServerResponse::ActorNotFound,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+    ECarlaServerResponse Response =
+        CarlaActor->SetWheelSuspensionOffset(
+            static_cast<EVehicleWheelLocation>(WheelLocation), Offset);
+    if (Response != ECarlaServerResponse::Success)
+    {
+      return RespondError(
+          "set_wheel_suspension_offset",
+          Response,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+    return R<void>::Success();
+  };
+
+  BIND_SYNC(get_wheel_suspension_offset) << [this](
+      const cr::ActorId ActorId,
+      cr::VehicleWheelLocation WheelLocation) -> R<float>
+  {
+    REQUIRE_CARLA_EPISODE();
+    FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
+    if(!CarlaActor){
+      return RespondError(
+          "get_wheel_suspension_offset",
+          ECarlaServerResponse::ActorNotFound,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+    float Value;
+    ECarlaServerResponse Response =
+        CarlaActor->GetWheelSuspensionOffset(
+            static_cast<EVehicleWheelLocation>(WheelLocation), Value);
+    if (Response != ECarlaServerResponse::Success)
+    {
+      return RespondError(
+          "get_wheel_suspension_offset",
+          Response,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+    return Value;
+  };
+
+  BIND_SYNC(set_wheel_animation_override) << [this](
+    cr::ActorId ActorId,
+    bool bEnabled) -> R<void>
+  {
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
+    if(!CarlaActor){
+      return RespondError(
+          "set_wheel_animation_override",
+          ECarlaServerResponse::ActorNotFound,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+    ECarlaServerResponse Response = CarlaActor->SetWheelAnimationOverride(bEnabled);
+    if (Response != ECarlaServerResponse::Success)
+    {
+      return RespondError(
+          "set_wheel_animation_override",
+          Response,
+          " Actor Id: " + FString::FromInt(ActorId));
+    }
+    return R<void>::Success();
+  };
+
   BIND_SYNC(set_actor_simulate_physics) << [this](
       cr::ActorId ActorId,
       bool bEnabled) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1914,6 +2596,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       bool bEnabled) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1938,6 +2621,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::ActorId ActorId) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1963,6 +2647,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       bool bEnabled) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -1995,11 +2680,16 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
           ECarlaServerResponse::ActorNotFound,
           " Actor Id: " + FString::FromInt(ActorId));
     }
-    else
+    TArray<FTransform> Transforms;
+    ECarlaServerResponse Response = CarlaActor->GetActorBoneWorldTransforms(Transforms);
+    if (Response != ECarlaServerResponse::Success)
     {
-      ACarlaWheeledVehicle* CarlaVehicle = Cast<ACarlaWheeledVehicle>(CarlaActor->GetActor());
-      return MakeVectorFromTArray<cr::Transform>(CarlaVehicle->GetWorldTransformedPose().LocalTransforms);
+      return RespondError(
+          "get_vehicle_bone_world_transforms",
+          Response,
+          " Actor Id: " + FString::FromInt(ActorId));
     }
+    return MakeVectorFromTArray<cr::Transform>(Transforms);
   };
 
   // ~~ Apply control ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2009,6 +2699,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::VehicleControl Control) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2034,6 +2725,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::VehicleAckermannControl Control) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2084,6 +2776,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::AckermannControllerSettings AckermannSettings) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2109,6 +2802,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::WalkerControl Control) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2171,6 +2865,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       carla::rpc::WalkerBoneControlIn Bones) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2193,11 +2888,131 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
     return R<void>::Success();
   };
 
+  // ~~ Walker navigation (server-side, engine navmesh) ~~~~~~~~~~~~~~~~~~~~
+
+  BIND_SYNC(is_navigation_server_side) << [this]() -> R<bool>
+  {
+    REQUIRE_CARLA_EPISODE();
+    auto *NavSubsystem = UCarlaNavigationSubsystem::Get(Episode->GetWorld());
+    return (NavSubsystem != nullptr) && NavSubsystem->HasServerSideNavigation();
+  };
+
+  BIND_SYNC(get_random_location_from_navigation) << [this]() -> R<cr::Location>
+  {
+    REQUIRE_CARLA_EPISODE();
+    // Failure sentinel per the phase-1 contract: the client retries or falls
+    // back to the legacy client-side navigation.
+    const cr::Location Sentinel{0.0f, 0.0f, -1e6f};
+    auto *NavSubsystem = UCarlaNavigationSubsystem::Get(Episode->GetWorld());
+    if (NavSubsystem == nullptr)
+    {
+      return Sentinel;
+    }
+    FVector Location;
+    if (!NavSubsystem->GetRandomNavLocation(Location))
+    {
+      return Sentinel;
+    }
+    ACarlaGameModeBase *GameMode = UCarlaStatics::GetGameMode(Episode->GetWorld());
+    ALargeMapManager *LargeMap = GameMode ? GameMode->GetLMManager() : nullptr;
+    if (LargeMap)
+    {
+      Location = LargeMap->LocalToGlobalLocation(Location);
+    }
+    return cr::Location(Location);
+  };
+
+  // Starts navigation, drawing the walker's crosser flag from the episode
+  // RNG exactly once (repeated starts keep the first draw, preserving the
+  // set_pedestrians_seed determinism guarantee).
+  const auto EnsureWalkerNavigationStarted =
+      [](UCarlaEpisode *Episode, AWalkerController *Controller) -> bool
+  {
+    if (Controller == nullptr)
+    {
+      return false;
+    }
+    if (Controller->IsNavigationActive())
+    {
+      return Controller->StartNavigation();
+    }
+    return Controller->StartNavigation(Episode->DrawWalkerIsCrosser());
+  };
+
+  BIND_SYNC(walker_start_navigation) << [this, EnsureWalkerNavigationStarted](
+      cr::ActorId ActorId) -> R<bool>
+  {
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    auto *Controller = ResolveWalkerNavController(Episode->FindCarlaActor(ActorId));
+    return EnsureWalkerNavigationStarted(Episode, Controller);
+  };
+
+  BIND_SYNC(walker_go_to_location) << [this, EnsureWalkerNavigationStarted](
+      cr::ActorId ActorId,
+      cr::Location Location) -> R<bool>
+  {
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    auto *Controller = ResolveWalkerNavController(Episode->FindCarlaActor(ActorId));
+    if (!EnsureWalkerNavigationStarted(Episode, Controller))
+    {
+      return false;
+    }
+    FVector UELocation = Location;
+    ACarlaGameModeBase *GameMode = UCarlaStatics::GetGameMode(Episode->GetWorld());
+    ALargeMapManager *LargeMap = GameMode ? GameMode->GetLMManager() : nullptr;
+    if (LargeMap)
+    {
+      UELocation = LargeMap->GlobalToLocalLocation(UELocation);
+    }
+    return Controller->GoToNavLocation(UELocation);
+  };
+
+  BIND_SYNC(walker_set_max_speed) << [this](
+      cr::ActorId ActorId,
+      float SpeedMPerSec) -> R<bool>
+  {
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    auto *Controller = ResolveWalkerNavController(Episode->FindCarlaActor(ActorId));
+    constexpr float MeterToCentimeter = 100.0f;
+    return (Controller != nullptr) &&
+        Controller->SetNavMaxSpeed(MeterToCentimeter * SpeedMPerSec);
+  };
+
+  BIND_SYNC(walker_stop_navigation) << [this](cr::ActorId ActorId) -> R<bool>
+  {
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    auto *Controller = ResolveWalkerNavController(Episode->FindCarlaActor(ActorId));
+    return (Controller != nullptr) && Controller->StopNavigation();
+  };
+
+  BIND_SYNC(set_pedestrians_cross_factor) << [this](float CrossFactor) -> R<bool>
+  {
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    // Applies to walkers whose navigation starts after this call (legacy
+    // semantics); a no-op success when no navmesh exists.
+    Episode->SetPedestriansCrossFactor(CrossFactor);
+    return true;
+  };
+
+  BIND_SYNC(set_pedestrians_seed) << [this](uint32_t Seed) -> R<bool>
+  {
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    Episode->SetPedestriansSeed(Seed);
+    return true;
+  };
+
   BIND_SYNC(blend_pose) << [this](
       cr::ActorId ActorId,
       float Blend) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2223,6 +3038,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::ActorId ActorId) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2249,6 +3065,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       bool bEnabled) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2274,6 +3091,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       bool bEnabled) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2299,6 +3117,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       std::string SimfilePath) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2324,6 +3143,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       bool bEnabled) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2354,6 +3174,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       std::string BaseJSONPath) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2386,6 +3207,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::TrafficLightState trafficLightState) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2412,6 +3234,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       float GreenTime) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2437,6 +3260,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       float YellowTime) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2462,6 +3286,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       float RedTime) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2487,6 +3312,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       bool Freeze) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2511,6 +3337,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       cr::ActorId ActorId) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if (!CarlaActor)
     {
@@ -2534,6 +3361,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
   BIND_SYNC(reset_all_traffic_lights) << [this]() -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     for (TActorIterator<ATrafficLightGroup> It(Episode->GetWorld()); It; ++It)
     {
       It->ResetGroup();
@@ -2545,6 +3373,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       (bool frozen) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     auto* GameMode = UCarlaStatics::GetGameMode(Episode->GetWorld());
     if (!GameMode)
     {
@@ -2563,7 +3392,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
     auto It = Episode->GetActorRegistry().begin();
     for (; It != Episode->GetActorRegistry().end(); ++It)
     {
-      const FCarlaActor& View = *(It.Value().Get());
+      const FCarlaActor& View = *(It->Value.Get());
       if (View.GetActorType() == FCarlaActor::ActorType::Vehicle)
       {
         if(View.IsDormant())
@@ -2662,6 +3491,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
   BIND_SYNC(get_gbuffer_token) << [this](const cr::ActorId ActorId, uint32_t GBufferId) -> R<std::vector<unsigned char>>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     FCarlaActor* CarlaActor = Episode->FindCarlaActor(ActorId);
     if(!CarlaActor)
     {
@@ -2684,6 +3514,13 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
         "get_gbuffer_token",
         ECarlaServerResponse::ActorTypeMismatch,
         " Actor Id: " + FString::FromInt(ActorId));
+    }
+    if (!FApp::CanEverRender())
+    {
+      return RespondError(
+          "get_gbuffer_token",
+          "this server cannot render (-nullrhi), GBuffer streams are not available",
+          " Actor Id: " + FString::FromInt(ActorId));
     }
 
     switch (GBufferId)
@@ -2764,12 +3601,14 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
   BIND_SYNC(start_recorder) << [this](std::string name, bool AdditionalData, bool StopReplayer) -> R<std::string>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     return R<std::string>(Episode->StartRecorder(name, AdditionalData, StopReplayer));
   };
 
   BIND_SYNC(stop_recorder) << [this]() -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     Episode->GetRecorder()->Stop();
     return R<void>::Success();
   };
@@ -2819,6 +3658,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       std::string map_override) -> R<std::string>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     return R<std::string>(Episode->GetRecorder()->ReplayFile(
         name,
         start,
@@ -2833,6 +3673,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
   BIND_SYNC(set_replayer_time_factor) << [this](double time_factor) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     Episode->GetRecorder()->SetReplayerTimeFactor(time_factor);
     return R<void>::Success();
   };
@@ -2840,6 +3681,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
   BIND_SYNC(set_replayer_ignore_hero) << [this](bool ignore_hero) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     Episode->GetRecorder()->SetReplayerIgnoreHero(ignore_hero);
     return R<void>::Success();
   };
@@ -2847,6 +3689,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
   BIND_SYNC(set_replayer_ignore_spectator) << [this](bool ignore_spectator) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     Episode->GetRecorder()->SetReplayerIgnoreSpectator(ignore_spectator);
     return R<void>::Success();
   };
@@ -2854,6 +3697,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
   BIND_SYNC(stop_replayer) << [this](bool keep_actors) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     Episode->GetRecorder()->StopReplayer(keep_actors);
     return R<void>::Success();
   };
@@ -2863,6 +3707,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
   BIND_SYNC(draw_debug_shape) << [this](const cr::DebugShape &shape) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     auto *World = Episode->GetWorld();
     check(World != nullptr);
     FDebugShapeDrawer Drawer(*World);
@@ -2875,10 +3720,124 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
   BIND_SYNC(clear_debug_shape) << [this]() -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     auto *World = Episode->GetWorld();
     check(World != nullptr);
     FDebugShapeDrawer Drawer(*World);
     Drawer.Clear();
+    return R<void>::Success();
+  };
+
+  // ~~ Spawn custom mesh ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+  BIND_SYNC(spawn_custom_mesh) << [this](
+      std::vector<float> vertices,
+      std::vector<uint32_t> triangles,
+      std::string material) -> R<void>
+  {
+    REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
+    auto *World = Episode->GetWorld();
+    check(World != nullptr);
+    if (vertices.empty() || (vertices.size() % 3u) != 0u)
+    {
+      RESPOND_ERROR("spawn_custom_mesh: vertices must be a non-empty flat (x, y, z) triple list");
+    }
+    if (triangles.empty() || (triangles.size() % 3u) != 0u)
+    {
+      RESPOND_ERROR("spawn_custom_mesh: triangles must be a non-empty index-triple list");
+    }
+    const uint32_t NumVertices = vertices.size() / 3u;
+    for (const uint32_t Index : triangles)
+    {
+      if (Index >= NumVertices)
+      {
+        RESPOND_ERROR("spawn_custom_mesh: triangle index out of range");
+      }
+    }
+
+    // Client sends metres in the client (UE-handed) frame; UE wants cm.
+    TArray<FVector> Verts;
+    Verts.Reserve(NumVertices);
+    for (uint32_t i = 0u; i < NumVertices; ++i)
+    {
+      Verts.Add(FVector(
+          vertices[3u * i + 0u] * 100.0f,
+          vertices[3u * i + 1u] * 100.0f,
+          vertices[3u * i + 2u] * 100.0f));
+    }
+    TArray<int32> Tris;
+    Tris.Reserve(triangles.size());
+    for (const uint32_t Index : triangles)
+    {
+      Tris.Add(static_cast<int32>(Index));
+    }
+
+    // Area-weighted vertex normals. UE's left-handed winding means the
+    // front face is the one from which the vertices wind clockwise, so the
+    // outward normal of triangle (V0, V1, V2) is (V2-V0) x (V1-V0).
+    TArray<FVector> Normals;
+    Normals.Init(FVector::ZeroVector, Verts.Num());
+    for (int32 i = 0; i + 2 < Tris.Num(); i += 3)
+    {
+      const FVector &V0 = Verts[Tris[i]];
+      const FVector &V1 = Verts[Tris[i + 1]];
+      const FVector &V2 = Verts[Tris[i + 2]];
+      const FVector FaceNormal = FVector::CrossProduct(V2 - V0, V1 - V0);
+      Normals[Tris[i]] += FaceNormal;
+      Normals[Tris[i + 1]] += FaceNormal;
+      Normals[Tris[i + 2]] += FaceNormal;
+    }
+    for (FVector &Normal : Normals)
+    {
+      Normal = Normal.GetSafeNormal(1e-8, FVector::UpVector);
+    }
+
+    // Planar world-space UVs so tiled materials repeat sensibly (5 m tile).
+    TArray<FVector2D> UV0;
+    UV0.Reserve(Verts.Num());
+    for (const FVector &V : Verts)
+    {
+      UV0.Add(FVector2D(V.X / 500.0f, V.Y / 500.0f));
+    }
+
+    ACarlaProceduralMeshActor *MeshActor = World->SpawnActor<ACarlaProceduralMeshActor>();
+    if (MeshActor == nullptr)
+    {
+      RESPOND_ERROR("spawn_custom_mesh: failed to spawn mesh actor");
+    }
+    UProceduralMeshComponent *PMC = MeshActor->MeshComponent;
+    PMC->bUseAsyncCooking = true;
+    PMC->bUseComplexAsSimpleCollision = true;
+    PMC->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+    PMC->CreateMeshSection_LinearColor(
+        0,
+        Verts,
+        Tris,
+        Normals,
+        UV0,
+        TArray<FLinearColor>(),
+        TArray<FProcMeshTangent>(),
+        true);
+
+    static const TMap<FString, FString> MaterialHints = {
+        {TEXT("grass"), TEXT("/Game/Carla/Static/GenericMaterials/Ground/MI_LargeLandscape_Grass.MI_LargeLandscape_Grass")},
+        {TEXT("dirt"), TEXT("/Game/Carla/Static/GenericMaterials/Ground/MI_Dirt.MI_Dirt")},
+        {TEXT("road"), TEXT("/Game/Carla/Static/GenericMaterials/Roads/MI_RoadAsphalt_Town15.MI_RoadAsphalt_Town15")},
+        {TEXT("sidewalk"), TEXT("/Game/Carla/Static/GenericMaterials/Sidewalk/MI_Sidewalk_Apartment.MI_Sidewalk_Apartment")}};
+    const FString MaterialName = cr::ToFString(material);
+    const FString *MaterialPath = MaterialHints.Find(MaterialName.ToLower());
+    const FString ResolvedPath = (MaterialPath != nullptr) ? *MaterialPath : MaterialName;
+    if (UMaterialInterface *Material = LoadObject<UMaterialInterface>(nullptr, *ResolvedPath))
+    {
+      PMC->SetMaterial(0, Material);
+    }
+
+    // Tag as terrain for semantic segmentation, mirroring the generated
+    // ground plane (OpenDriveGenerator's TagGeneratedComponent).
+    ATagger::SetStencilValue(*PMC, MeshActor->GetUniqueID(), cr::CityObjectLabel::Terrain, true);
+    PMC->ComponentTags.Add(FName(*ATagger::GetTagAsString(cr::CityObjectLabel::Terrain)));
+
     return R<void>::Success();
   };
 
@@ -2887,6 +3846,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
   BIND_SYNC(clear_debug_string) << [this]() -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     auto *World = Episode->GetWorld();
     check(World != nullptr);
     APlayerController *PlayerController = World->GetFirstPlayerController();
@@ -3005,6 +3965,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
     (std::string client, const std::vector<cr::LightState>& lights, bool discard_client) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     auto *World = Episode->GetWorld();
     if(World) {
       UCarlaLightSubsystem* CarlaLightSubsystem = World->GetSubsystem<UCarlaLightSubsystem>();
@@ -3017,6 +3978,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
     (std::string client, const bool active) -> R<void>
   {
     REQUIRE_CARLA_EPISODE();
+    REQUIRE_PRIMARY_SERVER();
     auto *World = Episode->GetWorld();
     if(World) {
       UCarlaLightSubsystem* CarlaLightSubsystem = World->GetSubsystem<UCarlaLightSubsystem>();
@@ -3109,6 +4071,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
 
 #undef BIND_ASYNC
 #undef BIND_SYNC
+#undef REQUIRE_PRIMARY_SERVER
 #undef REQUIRE_CARLA_EPISODE
 #undef RESPOND_ERROR_FSTRING
 #undef RESPOND_ERROR
@@ -3129,6 +4092,21 @@ FDataMultiStream FCarlaServer::Start(uint16_t RPCPort, uint16_t StreamingPort, u
   Pimpl = MakeUnique<FPimpl>(RPCPort, StreamingPort, SecondaryPort);
   StreamingPort = Pimpl->StreamingServer.GetLocalEndpoint().port();
   SecondaryPort = Pimpl->SecondaryServer->GetLocalEndpoint().port();
+
+#if PLATFORM_LINUX || PLATFORM_MAC
+  // The vendored rpclib server (Pimpl->Server) hides its listening-socket
+  // acceptor behind a PIMPL with no public accessor, so unlike the
+  // streaming/secondary listeners (which mark themselves close-on-exec at
+  // construction, see carla/streaming/detail/tcp/Server.cpp and
+  // carla/multigpu/listener.cpp) it can't be fixed at the point it's
+  // created. Without this, a forked child (e.g. RecastBuilder, launched by
+  // UCarlaEpisode::LoadNewOpendriveEpisode for pedestrian-nav generation)
+  // inherits the RPC listen socket; if the child outlives the server, it
+  // keeps the port bound and the next server boot aborts in asio's bind().
+  // rpc::server's constructor already binds+listens by the time FPimpl's
+  // constructor above returns, so the socket exists and is found by port.
+  carla::SetCloseOnExecForListeningPort(RPCPort);
+#endif // !_WIN32
 
   UE_LOG(
       LogCarlaServer,
@@ -3197,6 +4175,12 @@ void FCarlaServer::Tick()
   (void)Pimpl->TickCuesReceived.fetch_add(1, std::memory_order_release);
 }
 
+void FCarlaServer::SetIsSecondaryServer(bool bIsSecondary)
+{
+  check(Pimpl != nullptr);
+  Pimpl->bIsSecondaryServer = bIsSecondary;
+}
+
 bool FCarlaServer::TickCueReceived()
 {
   TRACE_CPUPROFILER_EVENT_SCOPE(FCarlaServer::TickCueReceived);
@@ -3205,6 +4189,14 @@ bool FCarlaServer::TickCueReceived()
   if (!flag)
     (void)Pimpl->TickCuesReceived.fetch_add(1, std::memory_order_release);
   return flag;
+}
+
+void FCarlaServer::ResetTickCues()
+{
+  if (Pimpl != nullptr)
+  {
+    Pimpl->TickCuesReceived.store(0u, std::memory_order_release);
+  }
 }
 
 void FCarlaServer::Stop()

@@ -11,9 +11,29 @@ set (
   ${CARLA_WORKSPACE_PATH}/LibCarla/source
 )
 
-carla_two_step_configure_file (
-  ${LIBCARLA_SOURCE_PATH}/carla/Version.h
-  ${LIBCARLA_SOURCE_PATH}/carla/Version.h.in
+# Version.h: the release version, the tag at HEAD, or <version>-<commit>.
+# Written now so it exists before anything compiles, and again by the
+# carla-version target on every build so the commit stays current.
+set (CARLA_VERSION_SOURCE ${LIBCARLA_SOURCE_PATH}/carla/Version.h.in)
+set (CARLA_VERSION_DESTINATION ${LIBCARLA_SOURCE_PATH}/carla/Version.h)
+set (CARLA_VERSION_GIT_DIR ${CARLA_WORKSPACE_PATH})
+include (${CARLA_WORKSPACE_PATH}/CMake/CarlaVersion.cmake)
+message (STATUS "CARLA version string: ${CARLA_VERSION_STRING}")
+
+carla_add_custom_target (
+  carla-version
+  "Refresh LibCarla/source/carla/Version.h from git (release version, tag or commit)."
+  COMMAND
+    ${CMAKE_COMMAND}
+    -DCARLA_VERSION=${CARLA_VERSION}
+    -DCARLA_RELEASE_VERSION=${CARLA_RELEASE_VERSION}
+    -DCARLA_VERSION_GIT_DIR=${CARLA_VERSION_GIT_DIR}
+    -DCARLA_VERSION_SOURCE=${CARLA_VERSION_SOURCE}
+    -DCARLA_VERSION_DESTINATION=${CARLA_VERSION_DESTINATION}
+    -P ${CARLA_WORKSPACE_PATH}/CMake/CarlaVersion.cmake
+  BYPRODUCTS
+    ${CARLA_VERSION_DESTINATION}
+  VERBATIM
 )
 
 if (WIN32)
@@ -39,6 +59,11 @@ if (WIN32)
     ""
   )
 
+  set (
+    MACROS_UNDEF_FILE_TEXT
+    ""
+  )
+
   foreach (WINDOWS_MACRO ${WINDOWS_MACRO_LIST})
     string (
       APPEND
@@ -50,6 +75,11 @@ if (WIN32)
       APPEND
       GUARD_END_FILE_TEXT
       "#pragma pop_macro(\"${WINDOWS_MACRO}\")\n"
+    )
+    string (
+      APPEND
+      MACROS_UNDEF_FILE_TEXT
+      "#undef ${WINDOWS_MACRO}\n"
     )
   endforeach ()
 
@@ -63,6 +93,12 @@ if (WIN32)
     WRITE
     ${LIBCARLA_SOURCE_PATH}/util/ue-header-guard-end.h
     ${GUARD_END_FILE_TEXT}
+  )
+
+  file (
+    WRITE
+    ${LIBCARLA_SOURCE_PATH}/util/windows-macros-undef.h
+    ${MACROS_UNDEF_FILE_TEXT}
   )
 
   set_directory_properties(
@@ -85,7 +121,28 @@ else ()
     ""
   )
 
+  file (
+    WRITE
+    ${LIBCARLA_SOURCE_PATH}/util/windows-macros-undef.h
+    ""
+  )
+
 endif ()
+
+
+
+# The OSM to OpenDRIVE converter, shared by the client (the Python API binding)
+# and the server (the editor's Digital Twin tool).
+file (
+  GLOB
+  LIBCARLA_SOURCES_OSM2ODR
+  ${LIBCARLA_SOURCE_PATH}/osm2odr/*.cpp
+)
+file (
+  GLOB
+  LIBCARLA_HEADERS_OSM2ODR
+  ${LIBCARLA_SOURCE_PATH}/osm2odr/*.h
+)
 
 
 
@@ -130,6 +187,12 @@ if (BUILD_CARLA_SERVER)
     ${LIBCARLA_SOURCE_PATH}/third-party/odrSpiral/*.cpp
     ${LIBCARLA_SOURCE_PATH}/third-party/moodycamel/*.cpp
     ${LIBCARLA_SOURCE_PATH}/third-party/pugixml/*.cpp
+  )
+
+  list (
+    APPEND
+    LIBCARLA_SERVER_SOURCES_THIRD_PARTY
+    ${LIBCARLA_SOURCES_OSM2ODR}
   )
 
   file (
@@ -184,6 +247,12 @@ if (BUILD_CARLA_SERVER)
     ${LIBCARLA_SOURCE_PATH}/third-party/odrSpiral/*.h
     ${LIBCARLA_SOURCE_PATH}/third-party/moodycamel/*.h
     ${LIBCARLA_SOURCE_PATH}/third-party/pugixml/*.hpp
+  )
+
+  list (
+    APPEND
+    LIBCARLA_SERVER_HEADERS_THIRD_PARTY
+    ${LIBCARLA_HEADERS_OSM2ODR}
   )
 
   # glibc 2.38+ compat shim (compiled as C11 to avoid __isoc23_strtol redirect)
@@ -348,6 +417,17 @@ if (BUILD_CARLA_CLIENT)
     ${LIBCARLA_SOURCE_PATH}/third-party/pugixml/*.cpp
   )
 
+  list (
+    APPEND
+    LIBCARLA_CLIENT_SOURCES_THIRD_PARTY
+    ${LIBCARLA_SOURCES_OSM2ODR}
+  )
+  list (
+    APPEND
+    LIBCARLA_CLIENT_HEADERS_THIRD_PARTY
+    ${LIBCARLA_HEADERS_OSM2ODR}
+  )
+
   carla_add_library (
     carla-client
     "Build the CARLA client."
@@ -455,6 +535,10 @@ if (BUILD_LIBCARLA_TESTS)
     ${LIBCARLA_SOURCE_PATH}/test/common/*.cpp
   )
 
+  if (NOT BUILD_LIBCARLA_MULTIGPU_TESTS)
+    list (FILTER LIBCARLA_TEST_COMMON_SOURCES EXCLUDE REGEX "/test_multigpu_[^/]*\\.cpp$")
+  endif ()
+
   if (BUILD_CARLA_SERVER)
 
     file (
@@ -462,6 +546,19 @@ if (BUILD_LIBCARLA_TESTS)
       LIBCARLA_TEST_SERVER_SOURCES
       ${LIBCARLA_SOURCE_PATH}/test/server/*.cpp
     )
+
+    if (NOT BUILD_LIBCARLA_MULTIGPU_TESTS)
+      list (FILTER LIBCARLA_TEST_SERVER_SOURCES EXCLUDE REGEX "/test_multigpu_[^/]*\\.cpp$")
+    endif ()
+
+    if (NOT ENABLE_ROS2)
+      list (
+        REMOVE_ITEM
+        LIBCARLA_TEST_SERVER_SOURCES
+        ${LIBCARLA_SOURCE_PATH}/test/server/test_ros2_middleware.cpp
+        ${LIBCARLA_SOURCE_PATH}/test/server/test_ros2_serialization.cpp
+      )
+    endif ()
 
     carla_add_executable (
       libcarla_test_server
@@ -490,6 +587,37 @@ if (BUILD_LIBCARLA_TESTS)
       LIBCARLA_WITH_GTEST
       LIBCARLA_TEST_CONTENT_FOLDER="${CARLA_WORKSPACE_PATH}/Build/test-content"
     )
+
+    if (ENABLE_ROS2)
+      # The ROS2 middleware tests need the Fast-CDR and Fast-DDS headers and
+      # shared libs that the Ros2Native ExternalProject chain installs at build
+      # time (Fast-DDS for GenericCdrPubSubType's TopicDataType base and
+      # SerializedPayload_t). The path mirrors PROJECT_INSTALL_PATH in
+      # Ros2Native/CMakeLists.txt.
+      set (CARLA_ROS2_NATIVE_INSTALL_PATH ${CMAKE_BINARY_DIR}/Ros2Native/install)
+      target_include_directories (
+        libcarla_test_server SYSTEM PRIVATE
+        ${CARLA_ROS2_NATIVE_INSTALL_PATH}/include
+      )
+      target_link_libraries (
+        libcarla_test_server PRIVATE
+        ${CARLA_ROS2_NATIVE_INSTALL_PATH}/lib/libfastcdr.so
+        ${CARLA_ROS2_NATIVE_INSTALL_PATH}/lib/libfastrtps.so
+      )
+      # libfastrtps.so privately depends on the foonathan_memory shared lib,
+      # whose file name is version- and config-dependent (e.g.
+      # libfoonathan_memory-0.7.4-dbg.so in Debug). -rpath-link lets the linker
+      # resolve those transitive symbols, and --disable-new-dtags emits DT_RPATH
+      # (instead of DT_RUNPATH) so the dynamic loader also searches this
+      # directory for libfastrtps.so's own dependencies at run time.
+      target_link_options (
+        libcarla_test_server PRIVATE
+        "LINKER:-rpath-link,${CARLA_ROS2_NATIVE_INSTALL_PATH}/lib"
+        "LINKER:-rpath,${CARLA_ROS2_NATIVE_INSTALL_PATH}/lib"
+        "LINKER:--disable-new-dtags"
+      )
+      add_dependencies (libcarla_test_server fastdds)
+    endif ()
 
   endif ()
 
@@ -532,3 +660,11 @@ if (BUILD_LIBCARLA_TESTS)
   endif ()
 
 endif ()
+
+
+
+foreach (TARGET_NAME carla-server carla-client)
+  if (TARGET ${TARGET_NAME})
+    add_dependencies (${TARGET_NAME} carla-version)
+  endif ()
+endforeach ()

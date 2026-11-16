@@ -13,7 +13,10 @@
 #include "Actor/ActorBlueprintFunctionLibrary.h"
 #include "ContentStreaming.h"
 #include "Engine/PostProcessVolume.h"
+#include "EngineUtils.h"
 #include "GameFramework/SpectatorPawn.h"
+#include "Misc/App.h"
+#include "SceneManagement.h"
 #include <util/ue-header-guard-end.h>
 
 #include <mutex>
@@ -26,14 +29,20 @@
 // load) cannot hand out the same index twice.
 static std::atomic<int> SCENE_CAPTURE_COUNTER{0};
 
-static TAutoConsoleVariable<int32> CVarCarlaCameraUseRayTracing(
-    TEXT("carla.Camera.UseRayTracing"),
-    -1,
-    TEXT("Global override for per-camera hardware ray-tracing on CARLA sensors.\n")
-    TEXT("  -1: Respect the per-sensor bUseRayTracing attribute (default).\n")
-    TEXT("   0: Force ray-tracing OFF on every camera.\n")
-    TEXT("   1: Force ray-tracing ON on every camera."),
-    ECVF_Default);
+// Registered by CarlaDeviceProfileSelectorModule, which loads first and sets it
+// per quality tier. -1 follows each sensor's bUseRayTracing, 0 forces ray
+// tracing off and 1 forces it on for every camera.
+static int32 GetCameraRayTracingOverride()
+{
+  static std::atomic<const TConsoleVariableData<int32> *> CVar{nullptr};
+  const TConsoleVariableData<int32> *Cached = CVar.load(std::memory_order_relaxed);
+  if (Cached == nullptr)
+  {
+    Cached = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("carla.Camera.UseRayTracing"));
+    CVar.store(Cached, std::memory_order_relaxed);
+  }
+  return (Cached != nullptr) ? Cached->GetValueOnAnyThread() : -1;
+}
 
 // Rollback / debug switch for the lazy GBuffer capture path. GBuffer captures
 // are only allocated when a client subscribes via listen_to_gbuffer(); setting
@@ -45,6 +54,59 @@ static TAutoConsoleVariable<int32> CVarCarlaCameraForceAllGBuffers(
     TEXT("Force CARLA scene-capture cameras to request every GBuffer texture\n")
     TEXT("each frame, irrespective of client subscription. Intended as a\n")
     TEXT("one-release rollback path; default is 0 (lazy, by subscription)."),
+    ECVF_Default);
+
+// Exposure-linked motion blur for the RGB cameras. A real camera blurs what
+// moves during its exposure time, which its auto exposure lengthens in the
+// dark (a machine-vision AV camera: ~0.1 ms by day, capped around 20 ms at
+// night, gain above that). Every capture reads the exposure the sensor's own
+// eye adaptation settled on (EV100 = log2(1 / (1.2 * Exposure))), turns it into
+// an exposure time t = N^2 / 2^EV100 for an f/N lens at base ISO, clamps it and
+// sets MotionBlurAmount = t / capture interval (1 = 360 degree shutter). Night
+// lamps then streak along their motion instead of twinkling between pixels.
+static TAutoConsoleVariable<int32> CVarCarlaCameraExposureMotionBlur(
+    TEXT("carla.Camera.ExposureMotionBlur"),
+    1,
+    TEXT("1: RGB cameras derive their motion blur from the auto exposure time (overrides motion_blur_intensity).\n")
+    TEXT("0: use the motion_blur_* attributes / post-process profile as they are."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarCarlaCameraFNumber(
+    TEXT("carla.Camera.FNumber"),
+    2.0f,
+    TEXT("Lens f-number used to turn the auto exposure into an exposure time (carla.Camera.ExposureMotionBlur)."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarCarlaCameraMinExposureMs(
+    TEXT("carla.Camera.MinExposureMs"),
+    0.05f,
+    TEXT("Shortest exposure time in ms (carla.Camera.ExposureMotionBlur)."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarCarlaCameraMaxExposureMs(
+    TEXT("carla.Camera.MaxExposureMs"),
+    20.0f,
+    TEXT("Longest exposure time in ms; darker scenes raise the gain instead (carla.Camera.ExposureMotionBlur)."),
+    ECVF_Default);
+
+// A new camera has no eye adaptation history: left alone it starts from a
+// default exposure and takes seconds to adapt (a white sky flash every time a
+// client respawns a camera, e.g. manual_control's TAB). Its first captures are
+// rendered as camera cuts, which makes the eye adaptation jump to its target:
+// the first image is still metered from scratch, the second one is settled.
+// (Extra unsent captures in the same tick do not help: the exposure a capture
+// computes only reaches the captures of later ticks.)
+static TAutoConsoleVariable<int32> CVarCarlaCameraSpawnCameraCuts(
+    TEXT("carla.Camera.SpawnCameraCuts"),
+    2,
+    TEXT("Number of first captures of a new camera rendered as camera cuts, so its auto exposure settles ")
+    TEXT("from the second image on instead of adapting for seconds from a default exposure (0 disables)."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarCarlaCameraExposureLog(
+    TEXT("carla.Camera.ExposureLog"),
+    0,
+    TEXT("1: log each RGB capture's exposure, exposure time and motion blur amount."),
     ECVF_Default);
 
 // =============================================================================
@@ -131,9 +193,17 @@ void ASceneCaptureSensor::ApplyRayTracingSetting()
   {
     return;
   }
-  const int32 CVarOverride = CVarCarlaCameraUseRayTracing.GetValueOnAnyThread();
-  const bool bEffective = (CVarOverride < 0) ? bUseRayTracing : (CVarOverride > 0);
-  CaptureComponent2D->bUseRayTracingIfEnabled = bEffective;
+  CaptureComponent2D->bUseRayTracingIfEnabled = ResolveCameraRayTracing(bUseRayTracing, RequiresRayTracing());
+}
+
+bool ASceneCaptureSensor::ResolveCameraRayTracing(const bool bSensorEnabled, const bool bRequired)
+{
+  if (bRequired)
+  {
+    return true;
+  }
+  const int32 CVarOverride = GetCameraRayTracingOverride();
+  return (CVarOverride < 0) ? bSensorEnabled : (CVarOverride > 0);
 }
 
 void ASceneCaptureSensor::SetFOVAngle(const float FOVAngle)
@@ -912,6 +982,20 @@ bool ASceneCaptureSensor::ApplyPostProcessVolumeToSensor(APostProcessVolume *Ori
 void ASceneCaptureSensor::EnqueueRenderSceneImmediate()
 {
   TRACE_CPUPROFILER_EVENT_SCOPE(ASceneCaptureSensor::EnqueueRenderSceneImmediate);
+  // Show-only mode: refresh the actor list (only rescans when the world's
+  // actor count changed) and push it into the capture component so actors
+  // spawned since the last capture are included.
+  if (ShowOnlyFilter.IsEnabled())
+  {
+    ShowOnlyFilter.Refresh(GetWorld(), &GetEpisode());
+    ShowOnlyFilter.ApplyTo(*CaptureComponent2D);
+  }
+  if (NumCaptures < CVarCarlaCameraSpawnCameraCuts.GetValueOnGameThread())
+  {
+    // Reset by the renderer after the capture.
+    CaptureComponent2D->bCameraCutThisFrame = true;
+    ++NumCaptures;
+  }
   // Creates an snapshot of the scene, requieres bCaptureEveryFrame = false.
 #ifdef CARLA_HAS_GBUFFER_API
   CaptureSceneExtended();
@@ -943,8 +1027,53 @@ void ASceneCaptureSensor::BeginPlay()
   CaptureComponent2D->Deactivate();
   CaptureComponent2D->TextureTarget = CaptureRenderTarget;
 
+  // Optional DLSS upscaling: render the capture at a fraction of the target
+  // resolution and let the engine's scene-capture temporal upscaler (DLSS
+  // Super Resolution, bilinear fallback on non-NVIDIA hardware) fill the
+  // render target. The render target itself stays at ImageWidth x ImageHeight,
+  // so client-visible output resolution is unchanged.
+  CaptureComponent2D->CaptureScreenPercentage =
+      bEnableDLSSUpscale ? FMath::Clamp(DLSSScreenPercentage, 25.0f, 100.0f) : 100.0f;
+  if (bEnableDLSSUpscale && !bEnablePostProcessingEffects)
+  {
+    UE_LOG(LogCarla, Warning, TEXT(
+        "%s: DLSS upscaling requested but post-processing effects are disabled; "
+        "the capture has no temporal AA method, so the engine will spatially "
+        "upscale instead of DLSS."), *GetName());
+  }
+
   // Call derived classes to set up their things.
   SetUpSceneCaptureComponent(*CaptureComponent2D);
+
+  // The capture component's own settings assert bOverride_ on every camera
+  // field (SetCameraDefaultOverrides), so map post-process volumes never blend
+  // into sensor renders and sensors don't match the main viewport. Absorb the
+  // map's enabled unbound PostProcessVolume here; the cache logic inside
+  // ApplyPostProcessVolumeToSensor keeps the camera attributes configured
+  // through the sensor API (exposure, film curve, DoF, ...) authoritative.
+  {
+    int32 VolumeCount = 0;
+    bool bApplied = false;
+    for (TActorIterator<APostProcessVolume> It(GetWorld()); It; ++It)
+    {
+      APostProcessVolume *Volume = *It;
+      ++VolumeCount;
+      if (!bApplied && bEnablePostProcessingEffects &&
+          IsValid(Volume) && Volume->bEnabled && Volume->bUnbound)
+      {
+        ApplyPostProcessVolumeToSensor(Volume, this, false);
+        UE_LOG(LogCarla, Log, TEXT("%s: absorbed map post-process volume %s"),
+            *GetName(), *Volume->GetName());
+        bApplied = true;
+      }
+    }
+    if (!bApplied && VolumeCount > 0)
+    {
+      UE_LOG(LogCarla, Verbose, TEXT(
+          "%s: no map post-process volume absorbed (bEnablePP=%d, volumes in world=%d)"),
+          *GetName(), bEnablePostProcessingEffects ? 1 : 0, VolumeCount);
+    }
+  }
 
   CaptureComponent2D->CaptureSource = ESceneCaptureSource::SCS_FinalToneCurveHDR;
 
@@ -972,7 +1101,10 @@ void ASceneCaptureSensor::BeginPlay()
   CaptureComponent2D->ShowFlags = PostProcessConfig.EngineShowFlags;
   CaptureComponent2D->PostProcessSettings = PostProcessConfig.PostProcessSettings;
 
-  if (ImageWidth < 1920 || ImageHeight < 1080)
+  // Exposure-linked motion blur (UpdateExposureMotionBlur) manages the flag
+  // itself; otherwise motion blur stays off below 1080p as before.
+  if ((ImageWidth < 1920 || ImageHeight < 1080) &&
+      (CVarCarlaCameraExposureMotionBlur.GetValueOnGameThread() == 0 || !ArePostProcessingEffectsEnabled()))
     CaptureComponent2D->ShowFlags.SetMotionBlur(false);
 
   // This ensures the camera is always spawning the raindrops in case the
@@ -1016,6 +1148,13 @@ bool ASceneCaptureSensor::IsAnyGBufferClientListening() const
 
 bool ASceneCaptureSensor::ShouldCaptureThisFrame()
 {
+  // A process without an RHI (-nullrhi) never creates the capture render
+  // target. Its cameras are rendered by a Multi-GPU secondary, so skip the
+  // capture even when a local listener (for example ROS 2) is active.
+  if (!FApp::CanEverRender())
+  {
+    return false;
+  }
   if (CVarCarlaCameraForceAllGBuffers.GetValueOnAnyThread() > 0)
   {
     return true;
@@ -1052,7 +1191,51 @@ void ASceneCaptureSensor::PostPhysTick(UWorld *World, ELevelTick TickType, float
   {
     return;
   }
+  UpdateExposureMotionBlur(World, DeltaTime);
   EnqueueRenderSceneImmediate();
+}
+
+void ASceneCaptureSensor::UpdateExposureMotionBlur(UWorld *World, float DeltaTime)
+{
+  // Simulation time between two captures of this sensor: the motion vectors
+  // span it (the view state keeps the previous capture's matrices).
+  const double Now = World != nullptr ? World->GetTimeSeconds() : 0.0;
+  const float Interval = LastCaptureTime >= 0.0 && Now > LastCaptureTime
+      ? static_cast<float>(Now - LastCaptureTime)
+      : FMath::Max(DeltaTime, 1e-3f);
+  LastCaptureTime = Now;
+
+  if (!ArePostProcessingEffectsEnabled() || CVarCarlaCameraExposureMotionBlur.GetValueOnGameThread() == 0)
+  {
+    return;
+  }
+  FSceneViewStateInterface *ViewState = CaptureComponent2D->GetViewState(0);
+  const float Exposure = ViewState != nullptr ? ViewState->GetLastEyeAdaptationExposure() : 0.0f;
+  if (!(Exposure > 0.0f) || !FMath::IsFinite(Exposure))
+  {
+    return;  // no eye adaptation readback yet (first frames)
+  }
+  const float FNumber = FMath::Max(CVarCarlaCameraFNumber.GetValueOnGameThread(), 0.5f);
+  const float MinSeconds = FMath::Max(CVarCarlaCameraMinExposureMs.GetValueOnGameThread(), 0.0f) * 1e-3f;
+  const float MaxSeconds = FMath::Max(CVarCarlaCameraMaxExposureMs.GetValueOnGameThread() * 1e-3f, MinSeconds);
+  ExposureSeconds = FMath::Clamp(FNumber * FNumber * 1.2f * Exposure, MinSeconds, MaxSeconds);
+
+  FPostProcessSettings &Settings = CaptureComponent2D->PostProcessSettings;
+  Settings.bOverride_MotionBlurAmount = true;
+  Settings.MotionBlurAmount = FMath::Clamp(ExposureSeconds / FMath::Max(Interval, 1e-3f), 0.0f, 1.0f);
+  // 0 = follow the render rate, so the blur length does not depend on how
+  // fast the simulator runs in wall-clock time (a fixed target FPS scales it
+  // by target / real delta, wrong in synchronous mode).
+  Settings.bOverride_MotionBlurTargetFPS = true;
+  Settings.MotionBlurTargetFPS = 0;
+  CaptureComponent2D->ShowFlags.SetMotionBlur(Settings.MotionBlurAmount > 0.001f);
+
+  if (CVarCarlaCameraExposureLog.GetValueOnGameThread() != 0)
+  {
+    UE_LOG(LogCarla, Log, TEXT("%s exposure %.4g (EV100 %.2f) -> %.3f ms, interval %.1f ms, motion blur %.3f"),
+        *GetName(), Exposure, FMath::Log2(1.0f / (1.2f * Exposure)), ExposureSeconds * 1e3f, Interval * 1e3f,
+        Settings.MotionBlurAmount);
+  }
 }
 
 void ASceneCaptureSensor::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -1062,6 +1245,14 @@ void ASceneCaptureSensor::EndPlay(const EEndPlayReason::Type EndPlayReason)
   if (CaptureRenderTarget)
   {
     CaptureRenderTarget->ReleaseResource();
+  }
+  // Free the persistent view state (Lumen scene, TSR history...) now instead
+  // of at the next garbage collection; see USceneCaptureComponent2D_CARLA.
+  if (CaptureComponent2D)
+  {
+    FlushRenderingCommands();
+    CaptureComponent2D->Deactivate();
+    CaptureComponent2D->ReleaseViewStates();
   }
   // Drop the sensor's strong ref. Any in-flight AsyncTask still holds a copy
   // of the shared_ptr, so the pool dies with the last consuming task.

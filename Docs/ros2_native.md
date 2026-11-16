@@ -1,56 +1,196 @@
-# ROS2 native interface
+# ROS 2 native interface
 
-![inverted_ai_logo](img/logos/ros_carla.png)
+![ros_carla_logo](img/logos/ros_carla.webp)
 
-The CARLA simulator supports ROS2 natively from the server. To use ROS2 with CARLA, launch the CARLA simulator from the command line with the `--ros2` command line option:
+CARLA speaks ROS 2 from the server itself — there is no bridge process. Sensors publish and vehicles subscribe as soon as the simulator is started with `-ros2`:
 
 ```sh
-./CarlaUnreal.sh --ros2
+./CarlaUnreal.sh -ros2
 ```
 
+![CARLA native ROS 2 interface](img/ros2_native/ros2_native_overview.svg)
+<div class="img-caption">The server publishes sensor data, the clock and the transform tree, and the ego vehicle subscribes to control commands, through the middleware chosen at launch. Any ROS 2 node on the same domain id sees the topics, such as RViz or Autoware.</div>
+
+- [__Quick start__](#quick-start)
+- [__Middleware (RMW)__](#middleware-rmw)
+- [__ROS 2 domain id__](#ros-2-domain-id)
+- [__Sensor data__](#sensor-data)
+- [__Transforms__](#transforms)
+- [__Simulation time__](#simulation-time)
+- [__Control data__](#control-data)
+- [__Related pages__](#related-pages)
+
+!!! Note
+    The flag is single-dash, `-ros2`; `--ros2` is also accepted on this branch. A source build has to be configured with `-DENABLE_ROS2=ON`, which is the default in CI but not in a plain configure.
+
+---
+## Quick start
+
+!!! agent "Agentic CARLA"
+    *"Start CARLA with ROS 2, spawn a vehicle with a camera and a lidar, and check that their topics publish."*
+
+    Skills: `run-carla-ue58-server`, `create-sensor`, `visualize-ros-rviz`. [Set up Agentic CARLA](agent_skills.md#set-up-agentic-carla).
+
+```sh
+# Terminal 1: the server
+./CarlaUnreal.sh -ros2
+
+# Terminal 2: spawn a hero vehicle with a camera, LIDAR, GNSS and IMU
+cd PythonAPI/examples/ros2
+python3 ros2_native.py --file stack.json
+
+# Terminal 3: see what it publishes
+ros2 topic list
+ros2 topic echo /clock
+```
+
+---
+## Middleware (RMW)
+
+The native connector can publish through any of three middlewares. Select one with the `--rmw=` option, which is only valid together with `--ros2`:
+
+```sh
+./CarlaUnreal.sh --ros2 --rmw=cyclonedds
+```
+
+Accepted values are `fastdds` (the default), `cyclonedds`, and `zenoh`. The native interface itself is built on Linux only, so all three are Linux-only. If the value is not recognized, or names a middleware that was not compiled into the binary, ROS 2 is disabled for that session and an error is logged listing the available middlewares. The published topics and message formats are identical across all middlewares.
+
+`--rmw=zenoh` is compatible with `rmw_zenoh_cpp` peers and requires a Zenoh router (`ros2 run rmw_zenoh_cpp rmw_zenohd`) running before the simulator starts. The session connects to `tcp/localhost:7447` by default; set `ZENOH_SESSION_CONFIG_URI` to point at a different rmw_zenoh config file, or `ZENOH_CONFIG_OVERRIDE` to patch individual keys.
+
+### Fast-DDS transport and shared memory
+
+With `--rmw=fastdds` the simulator restricts the Fast-DDS participant to the **UDPv4 transport only**. Fast-DDS's own builtin default (UDPv4 + shared memory, preferring shared memory for peers on the same host) silently delivers no data whenever the shared-memory path cannot actually be shared, while discovery keeps working — topics appear in `ros2 topic list` but `ros2 topic echo` never receives a sample, with no warning on either side. This happens in three independent, common situations:
+
+- the subscriber runs in a container without `--ipc=host` (separate `/dev/shm` namespace);
+- the subscriber runs as a different user than the simulator (Fast-DDS segment files are created `0644`, so cross-user writes into the reader's port fail) — this includes containers running as root against a simulator running as a regular user;
+- the subscriber uses an incompatible Fast-DDS generation (for example ROS 2 Humble ships Fast-DDS 2.6, which cannot exchange shared memory with the simulator's 2.14).
+
+Fast-DDS does not fall back to UDP when the shared-memory path is unreachable, so with the stock default any of the above results in silent data loss. The UDPv4-only default makes every subscriber — containerized or not, any user, any ROS 2 distribution — work without configuration.
+
+Same-host power users who want shared-memory (or `LARGE_DATA`) performance back can set the standard [`FASTDDS_BUILTIN_TRANSPORTS`](https://fast-dds.docs.eprosima.com/en/latest/fastdds/env_vars/env_vars.html) environment variable (e.g. `FASTDDS_BUILTIN_TRANSPORTS=DEFAULT`) when launching the simulator; the simulator then leaves the transport selection entirely to Fast-DDS and logs the active choice at startup. For shared memory to actually deliver, the subscriber must share the IPC namespace, run as the same uid, and use a compatible Fast-DDS version. The other middlewares are unaffected: CycloneDDS and Zenoh never use shared memory in this build.
+
+An XML profile also replaces the UDPv4-only default. If `FASTRTPS_DEFAULT_PROFILES_FILE` names a file whose default participant profile sets its own transports, the simulator keeps those transports. The [Autoware](autoware.md) launcher uses this to limit the simulator to the docker bridge interface.
+
+#### Which subscriber setups receive data (`--rmw=fastdds`)
+
+Every combination below was verified against a live simulator (Fast-DDS 2.14.6). "ROS 2 Jazzy" stands for any peer on a Fast-DDS 2.14-generation stack, "ROS 2 Humble" for the 2.6 generation. A ✗ always looks the same: topics are listed, `ros2 topic echo` receives nothing, and neither side logs a warning.
+
+| Subscriber setup | Simulator default (UDPv4 only) | Simulator with `FASTDDS_BUILTIN_TRANSPORTS=DEFAULT` (UDPv4 + SHM) |
+|---|---|---|
+| Another machine on the network | ✓ UDP | ✓ UDP (SHM is never selected across hosts) |
+| Same host, same user, Jazzy | ✓ UDP | ✓ SHM |
+| Same host, different user (any distro) | ✓ UDP | ✗ no data — cross-user SHM writes fail |
+| Same host, same user, Humble | ✓ UDP | ✗ no data — incompatible SHM generation |
+| Container, `--net=host` only | ✓ UDP | ✗ no data — separate `/dev/shm` |
+| Container, `--net=host --ipc=host` (default root user) | ✓ UDP | ✗ no data — uid mismatch |
+| Container, `--net=host --ipc=host --user <simulator uid>`, Jazzy | ✓ UDP | ✓ SHM |
+| Container, `--net=host --ipc=host --user <simulator uid>`, Humble | ✓ UDP | ✗ no data — incompatible SHM generation |
+| Any container, subscriber forced to UDP via `FASTRTPS_DEFAULT_PROFILES_FILE` (profile shipped in `PythonAPI/examples/ros2/config/fastrtps-profile.xml`) | ✓ UDP | ✓ UDP |
+
+The shared-memory column depends on the host and on the Fast-DDS patch version. In a check of the CARLA 1.0 package, two rows differed. The Humble `--user <simulator uid>` row (Fast-DDS 2.6.12) received data in 2 of 2 runs. The root `--net=host --ipc=host` row received data in 1 of 2 runs.
+
+`--rmw=cyclonedds` behaves like the first column in every row (UDP only, no shared-memory support compiled in). `--rmw=zenoh` is independent of this table entirely; it requires the Zenoh router and `rmw_zenoh_cpp` peers as described above.
+
+#### Camera and lidar rates over UDP
+
+Over UDP, a sensor sample is many datagrams that arrive at once: about 2 MB for an 800x600 camera frame. The subscriber's socket buffer has to hold them until its DDS thread reads them, and the operating system default (about 200 KB on Linux) does not. The overflow drops datagrams, so whole samples are lost, with no warning on either side. With default buffers, an 800x600 camera and a default lidar at `sensor_tick=0.1` arrived at about 2 Hz instead of 10 Hz. Small messages (IMU, GNSS, small images) are not affected. The simulator itself delivers every sample; the loss is in the subscriber's socket.
+
+Give the subscriber a larger receive buffer. The profiles in `PythonAPI/examples/ros2/config/` ask for 16 MB (`fastrtps-profile.xml` for Fast-DDS, `cyclonedds.xml` for CycloneDDS). With them, the same camera and lidar arrived at 10.4 Hz. The kernel caps the request at `net.core.rmem_max`, which is about 200 KB by default on Ubuntu. Below 16 MB the subscribers still start, but large samples are dropped as described above (CycloneDDS logs `failed to increase socket receive buffer size ... continuing with ...`). Raise the limit once on the subscriber's host:
+
+```sh
+sudo sysctl -w net.core.rmem_max=16777216 net.core.wmem_max=16777216
+export FASTRTPS_DEFAULT_PROFILES_FILE=PythonAPI/examples/ros2/config/fastrtps-profile.xml  # Fast-DDS
+export CYCLONEDDS_URI=file://$PWD/PythonAPI/examples/ros2/config/cyclonedds.xml          # CycloneDDS
+```
+
+`netstat -su` shows the drops as `receive buffer errors`.
+
+---
+## ROS 2 domain id
+
+The ROS2 domain id used by the native connector is configurable with the `--ros-domain-id=<N>` option, which is only valid together with `--ros2`:
+
+```sh
+./CarlaUnreal.sh --ros2 --ros-domain-id=42
+```
+
+`N` must be an integer in the range 0 to 232. The effective domain id is resolved in this order: the `--ros-domain-id` value, then the `ROS_DOMAIN_ID` environment variable, then the default domain 0. Out-of-range values (from either the option or the environment variable) are ignored and the next source is used. Without the option, the server uses `ROS_DOMAIN_ID` if it is set, else domain 0. The chosen domain id applies to every middleware (FastDDS, CycloneDDS, and Zenoh), so peers must run on the same domain to discover the topics.
+
+---
 ## Sensor data
 
-The CARLA server will broadcast sensor data for any spawned sensors for which ROS is enabled. To enable a sensor for ROS use the `enable_for_ros()` method of the sensor class:
+Every spawned sensor that has a ROS 2 publisher (see [Published sensors](ros2_native_sensors.md#published-sensors)) publishes by default; the project setting __ROS2 Topics Visible On Startup__ (`ROS2TopicVisibility`, on by default) decides that. Turn it off to publish only the sensors you ask for, and choose per sensor from the client:
 
 ```py
-sensor = world.spawn_actor(sensor_blueprint, transform)
 sensor.enable_for_ros()
+sensor.disable_for_ros()
+sensor.is_enabled_for_ros()
 ```
 
-Set the ROS topic name in the sensor blueprint prior to spawning (a random string name will be generated by default):
+__Topic names are built from the sensor and its parent.__ Set `ros_name` on the blueprint before spawning; without it the sensor falls back to its type and stream id, for example `rgb123`, which is stable for a run but not across runs.
 
 ```py
 bp = bp_lib.find('sensor.camera.rgb')
 bp.set_attribute('ros_name', 'front_camera')
 ```
 
-In this case the image data will be published to: `/carla/front_camera/image`. 
+The image is then published to `/carla/front_camera/image`. When the camera is attached to a parent, the parent's own `ros_name` is prefixed, so a camera on a vehicle whose `ros_name` is `ego` publishes to `/carla/ego/front_camera/image`:
 
-If the camera is parented to an actor, for example the ego vehicle, the topic name will also include the role name given to the vehicle: `/carla/ego/front_camera/image`.
+```py
+ego_bp.set_attribute('role_name', 'hero')   # makes it the ego for the server
+ego_bp.set_attribute('ros_name', 'ego')     # names the topic segment
+ego = world.spawn_actor(ego_bp, spawn_point)
+camera = world.spawn_actor(bp, transform, attach_to=ego)
+```
 
-See the [ROS2 sensors reference](ros2_native_sensors.md) for details about the message formats used for each sensor type.
+If a stack expects a topic that does not follow that convention, `ros_topic_name` replaces the generated name:
 
+```py
+bp.set_attribute('ros_topic_name', '/sensing/camera/traffic_light')
+```
+
+The camera then publishes on `/sensing/camera/traffic_light/image` and `/sensing/camera/traffic_light/camera_info`: the override replaces the `/carla/<parent>/<sensor>` part and the per-sensor suffix is still appended under it. LIDAR, semantic LIDAR, HSS LIDAR and radar are the exception and publish on the overridden name verbatim, with no `/point_cloud` suffix.
+
+Three topics are global rather than per sensor: the simulation clock on `/clock`, and the transform tree on `/tf` and `/tf_static`, described in [Transforms](#transforms).
+
+See the [ROS 2 sensors reference](ros2_native_sensors.md) for details about the message formats used for each sensor type.
+
+---
 ## Transforms
 
-By default CARLA also broadcasts a ROS 2 transform for every actor. It publishes: `/tf_static` for actors parented to another actor, `/tf` otherwise. Set the `no_transform` attribute to opt an actor out of this, leaving its frame to be published somewhere else:
+!!! Note
+    This section describes the OpenADS fork. Upstream CARLA publishes every transform on `/tf` against the root frame `map`.
+
+The transform tree is rooted in `carla_map`, the origin of the CARLA world. The frame `map` is left to the driving stack, whose map origin is in general not the CARLA origin.
+
+| Actor | Topic | Transform |
+| --- | --- | --- |
+| A sensor attached to a parent | `/tf_static` | parent frame → sensor frame, latched (reliable, transient local), zero stamp |
+| A sensor without a parent | `/tf` | `carla_map` → sensor frame, every sensor tick |
+| The parent of a [`sensor.other.tf`](ros2_native_sensors.md#published-sensors) | `/tf` | `carla_map` → parent frame, every sensor tick |
+
+A vehicle has no transform of its own: attach a `sensor.other.tf` to it to connect it, and with it every sensor on it, to `carla_map`. A [`sensor.other.odometry`](ros2_native_sensors.md#published-sensors) publishes the same pose together with the velocity as `nav_msgs/Odometry`. Both take two attributes that flatten the pose for stacks that work in the plane: `ignore_altitude` sets z to zero, `ignore_tilt` sets roll and pitch to zero. `sensor.other.imu` takes `ignore_tilt` as well.
+
+Set the `no_transform` attribute on any blueprint to opt that actor out, leaving its frame to be published somewhere else:
 
 ```py
 bp.set_attribute('no_transform', 'true')
 ```
 
-Sensor data topics are unaffected — only the transform is suppressed. This is useful when the actor's frame in ROS is not meant to follow its absolute pose in the CARLA world, for example when infrastructure sensors are placed relative to the ground rather than at their true altitude.
+The actor's data topics are unaffected: only its transform is suppressed. This is useful when the actor's frame in ROS is not meant to follow its absolute pose in the CARLA world, for example when infrastructure sensors are placed relative to the ground rather than at their true altitude. `world.set_publish_tf(False)` turns every transform off at once.
 
+---
 ## Simulation time
 
 An episode's simulation clock starts at zero. Pass `-carla-start-time=<unix_timestamp>` to start it from a given moment instead, so that ROS timestamps read as wall-clock time rather than as seconds since the episode began:
 
 ```sh
-./CarlaUnreal.sh --ros2 -carla-start-time=$(date +%s)
+./CarlaUnreal.sh -ros2 -carla-start-time=$(date +%s)
 ```
 
 The value is a **Unix timestamp** — seconds since 1970-01-01 UTC, as printed by `date +%s`. A negative value means "the Unix time at which the server starts", which is convenient for a single server but leaves the epoch unknown to anything that has to agree on it up front.
 
-The same setting can be given as `StartTime` under `[CARLA/Server]` in `CarlaSettings.ini` < in a file passed with `-carla-settings=` or as a  < command-line option `-carla-start-time=` which takes precedence over both.
+The same setting can be given as `StartTime` under `[CARLA/Server]` in `CarlaSettings.ini`, or in a file passed with `-carla-settings=`. The command-line option `-carla-start-time=` takes precedence over both.
 
 The clock is seeded at the beginning of *every* episode, not only the first. E.g., loading or reloading a map therefore restarts it at the configured moment and replays the same range of simulation time, so time steps backwards across the reload, `/clock` included. No `/clock` is published at all while the level transitions. This keeps scenarios exactly reproducible.
 
@@ -58,34 +198,44 @@ Only the start of the clock is set, not its rate: the simulation time still adva
 
 The option seeds the episode clock itself, not just the ROS 2 output, so `/clock`, every sensor's message header, `carla.Timestamp.elapsed_seconds`, and the timestamp on sensor data received through the Python API all share the same start time.
 
+---
 ## Control data
 
-Controls may be sent to one ego vehicle:
+Every vehicle spawned with the role name `hero` or `ego` gets its own command topic:
 
 ```py
-bp = bp.find("vehicle.lincoln.mkz_2020")
-bp.set_attribute("ros_name", "ego")
+bp = world.get_blueprint_library().find('vehicle.lincoln.mkz')
+bp.set_attribute('role_name', 'hero')   # the server only subscribes for 'hero' or 'ego'
+bp.set_attribute('ros_name', 'ego')     # the name the topics are built from
 
-ego = carla.spawn_actor(bp, spawn_point)
+ego = world.spawn_actor(bp, spawn_point)
 ```
 
-When the ego vehicle is spawned a subscriber will be created with ROS topic name: `/carla/ego/vehicle_control_cmd`. 
+The `role_name` is what makes the server create a control subscriber at all: it has to be `hero` or `ego`. The `ros_name` is what the topic is named after, so the pair above gives `/carla/ego/vehicle_control_cmd`.
 
-## CarlaEgoVehicleControl.msg
+__A vehicle listens on exactly one command surface__, chosen at spawn time by two blueprint attributes, so two topics can never fight over the same frame:
 
-To send control messages, install the [ros-carla-msgs ROS package](https://github.com/carla-simulator/ros-carla-msgs/tree/master). The control message has the following fields:
+| Attribute | Topic | Message | Control |
+| --- | --- | --- | --- |
+| none, the default | `/carla/ego/vehicle_control_cmd` | [`carla_msgs/CarlaEgoVehicleControl`](ros2_native_msgs.md#carlaegovehiclecontrol) | Throttle, steer and brake directly |
+| `ros2_ackermann_control` | `/carla/ego/ackermann_control_cmd` | [`ackermann_msgs/AckermannDriveStamped`](ros2_native_msgs.md#ackermanndrivestamped) | Target speed, acceleration and steering angle, converted to vehicle control by the server |
+| `ros2_autoware_control` | the fixed `/control/command/*` topics | [Autoware messages](ros2_native_msgs.md#autoware-messages) | Autoware's own vehicle interface, see [Autoware](autoware.md) |
 
-| Field                                                                                                   | Type                                                                                                    | Description                                                                                             |
-| ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `header`                                                                                                | [Header](https://docs.ros.org/en/melodic/api/std_msgs/html/msg/Header.html)                               | Time stamp and frame ID when the message is published.                                                  |
-| `throttle`                                                                                              | float32                                                                                                 | Scalar value to cotrol the vehicle throttle: **[0.0, 1.0]**                                             |
-| `steer`                                                                                                 | float32                                                                                                 | Scalar value to control the vehicle steering direction: **[-1.0, 1.0]** to control the vehicle steering |
-| `brake`                                                                                                 | float32                                                                                                 | Scalar value to control the vehicle brakes: **[0.0, 1.0]**                                              |
-| `hand_brake`                                                                                            | bool                                                                                                    | If **True**, the hand brake is enabled.                                                                 |
-| `reverse`                                                                                               | bool                                                                                                    | If **True**, the vehicle will move reverse.                                                             |
-| `gear`                                                                                                  | int32                                                                                                   | Changes between the available gears in a vehicle.                                                       |
-| `manual_gear_shift`                                                                                     | bool                                                                                                    | If **True**, the gears will be shifted using `gear`.                                                    |
+Set the attribute before spawning:
+
+```py
+bp.set_attribute('ros2_ackermann_control', 'true')
+```
+
+Choose whichever suits the stack: `vehicle_control_cmd` for a controller that already produces pedal and steering commands, `ackermann_control_cmd` for one that works in speed and steering angle. `ros2_autoware_control` wins when both it and the Ackermann attribute are set.
+
+The CARLA message types come from the [ros-carla-msgs package](https://github.com/carla-simulator/ros-carla-msgs); every message is defined field by field in [ROS 2 messages](ros2_native_msgs.md).
+
 
 ---
+## Related pages
 
-
+- [ROS 2 sensors](ros2_native_sensors.md) — what each sensor publishes, on which topic and in which message.
+- [ROS 2 messages](ros2_native_msgs.md) — the definition of each message, field by field.
+- [Autoware](autoware.md) — driving the ego vehicle with the Autoware stack over this interface.
+- [ROS bridge](ros_bridge.md) — the separate bridge project, which targets the Unreal Engine 4 line.

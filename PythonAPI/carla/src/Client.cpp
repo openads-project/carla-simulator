@@ -13,6 +13,26 @@
 namespace ctm = carla::traffic_manager;
 namespace cg = carla::geom;
 
+namespace carla {
+namespace rpc {
+
+  std::ostream &operator<<(std::ostream &out, const ContentPackInfo &pack) {
+    out << "ContentPackInfo(name=" << pack.name
+        << ", version=" << pack.version
+        << ", base_release=" << pack.base_release
+        << ", path=" << pack.path
+        << ", mounted=" << (pack.mounted ? "True" : "False")
+        << ", maps=[";
+    for (size_t i = 0u; i < pack.maps.size(); ++i) {
+      out << (i == 0u ? "" : ", ") << pack.maps[i];
+    }
+    out << "])";
+    return out;
+  }
+
+} // namespace rpc
+} // namespace carla
+
 static void SetTimeout(carla::client::Client &client, double seconds) {
   client.SetTimeout(TimeDurationFromSeconds(seconds));
 }
@@ -30,9 +50,35 @@ static auto GetAvailableMaps(const carla::client::Client &self) {
   return result;
 }
 
+static auto GetContentPacks(const carla::client::Client &self) {
+  boost::python::list result;
+  std::vector<carla::rpc::ContentPackInfo> packs;
+  {
+    carla::PythonUtil::ReleaseGIL unlock;
+    packs = self.GetContentPacks();
+  }
+  for (const auto &pack : packs) {
+    result.append(pack);
+  }
+  return result;
+}
+
+static auto ContentPackInfoMaps(const carla::rpc::ContentPackInfo &self) {
+  boost::python::list result;
+  for (const auto &map : self.maps) {
+    result.append(map);
+  }
+  return result;
+}
+
 static auto GetRequiredFiles(const carla::client::Client &self, const std::string &folder, const bool download) {
   boost::python::list result;
-  for (const auto &str : self.GetRequiredFiles(folder, download)) {
+  std::vector<std::string> files;
+  {
+    carla::PythonUtil::ReleaseGIL unlock;
+    files = self.GetRequiredFiles(folder, download);
+  }
+  for (const auto &str : files) {
     result.append(str);
   }
   return result;
@@ -46,8 +92,14 @@ static void ApplyBatchCommands(
   std::vector<CommandType> cmds{
     boost::python::stl_input_iterator<CommandType>(commands),
         boost::python::stl_input_iterator<CommandType>()};
+  carla::PythonUtil::ReleaseGIL unlock;
   self.ApplyBatch(std::move(cmds), do_tick);
 }
+
+static std::vector<carla::rpc::CommandResponse> ApplyBatchCommandsSyncNoGIL(
+    const carla::client::Client &self,
+    std::vector<carla::rpc::Command> &cmds,
+    bool do_tick);
 
 static auto ApplyBatchCommandsSync(
     const carla::client::Client &self,
@@ -60,11 +112,29 @@ static auto ApplyBatchCommandsSync(
     boost::python::stl_input_iterator<CommandType>()
   };
 
+  // Release the GIL while waiting for the server: a sensor callback waiting
+  // for the GIL stops its streaming thread from reading the socket, and in
+  // synchronous mode the server then blocks sending to it (#10233).
+  std::vector<carla::rpc::CommandResponse> responses;
+  {
+    carla::PythonUtil::ReleaseGIL unlock;
+    responses = ApplyBatchCommandsSyncNoGIL(self, cmds, do_tick);
+  }
+
   boost::python::list result;
-  auto responses = self.ApplyBatchSync(cmds, do_tick);
   for (auto &response : responses) {
     result.append(std::move(response));
   }
+  return result;
+}
+
+static std::vector<carla::rpc::CommandResponse> ApplyBatchCommandsSyncNoGIL(
+    const carla::client::Client &self,
+    std::vector<carla::rpc::Command> &cmds,
+    bool do_tick) {
+
+  using CommandType = carla::rpc::Command;
+  auto responses = self.ApplyBatchSync(cmds, do_tick);
 
   // check for autopilot command
   std::vector<carla::traffic_manager::ActorPtr> vehicles_to_enable(cmds.size(), nullptr);
@@ -167,13 +237,23 @@ static auto ApplyBatchCommandsSync(
     self.GetInstanceTM(tm_port).UnregisterVehicles(sorted_vehicle_to_disable);
   }
 
-  return result;
+  return responses;
 }
 
 void export_client() {
   using namespace boost::python;
   namespace cc = carla::client;
   namespace rpc = carla::rpc;
+
+  class_<rpc::ContentPackInfo>("ContentPackInfo", no_init)
+    .def_readonly("name", &rpc::ContentPackInfo::name)
+    .def_readonly("version", &rpc::ContentPackInfo::version)
+    .def_readonly("base_release", &rpc::ContentPackInfo::base_release)
+    .def_readonly("path", &rpc::ContentPackInfo::path)
+    .def_readonly("mounted", &rpc::ContentPackInfo::mounted)
+    .add_property("maps", &ContentPackInfoMaps)
+    .def(self_ns::str(self_ns::self))
+  ;
 
   class_<rpc::OpendriveGenerationParameters>("OpendriveGenerationParameters",
       init<double, double, double, double, bool, bool, bool>((arg("vertex_distance")=2.0, arg("max_road_length")=50.0, arg("wall_height")=1.0, arg("additional_width")=0.6, arg("smooth_junctions")=true, arg("enable_mesh_visibility")=true, arg("enable_pedestrian_navigation")=true)))
@@ -216,12 +296,15 @@ void export_client() {
     .def("get_server_version", CONST_CALL_WITHOUT_GIL(cc::Client, GetServerVersion))
     .def("get_world", &cc::Client::GetWorld)
     .def("get_available_maps", &GetAvailableMaps)
+    .def("get_content_packs", &GetContentPacks)
+    .def("mount_content_pack", CONST_CALL_WITHOUT_GIL_1(cc::Client, MountContentPack, std::string), (arg("path")))
+    .def("unmount_content_pack", CONST_CALL_WITHOUT_GIL_1(cc::Client, UnmountContentPack, std::string), (arg("name")))
     .def("set_files_base_folder", &cc::Client::SetFilesBaseFolder, (arg("path")))
     .def("get_required_files", &GetRequiredFiles, (arg("folder")="", arg("download")=true))
     .def("request_file", &cc::Client::RequestFile, (arg("name")))
     .def("reload_world", CONST_CALL_WITHOUT_GIL_1(cc::Client, ReloadWorld, bool), (arg("reset_settings")=true))
     .def("load_world", CONST_CALL_WITHOUT_GIL_3(cc::Client, LoadWorld, std::string, bool, rpc::MapLayer), (arg("map_name"), arg("reset_settings")=true, arg("map_layers")=rpc::MapLayer::All))
-    .def("load_world_if_different", &cc::Client::LoadWorldIfDifferent, (arg("map_name"), arg("reset_settings")=true, arg("map_layers")=rpc::MapLayer::All))
+    .def("load_world_if_different", CONST_CALL_WITHOUT_GIL_3(cc::Client, LoadWorldIfDifferent, std::string, bool, rpc::MapLayer), (arg("map_name"), arg("reset_settings")=true, arg("map_layers")=rpc::MapLayer::All))
     .def("generate_opendrive_world", CONST_CALL_WITHOUT_GIL_3(cc::Client, GenerateOpenDriveWorld, std::string,
         rpc::OpendriveGenerationParameters, bool), (arg("opendrive"), arg("parameters")=rpc::OpendriveGenerationParameters(),
         arg("reset_settings")=true))

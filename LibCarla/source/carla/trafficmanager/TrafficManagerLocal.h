@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -105,6 +106,9 @@ private:
   std::unique_ptr<std::thread> worker_thread;
   /// Last processed frame
   size_t last_frame{0};
+  /// Starts at the limit so the first batch of an episode is waited for.
+  uint64_t unwaited_control_batches {
+      constants::WorldInfoRefresh::MAX_UNWAITED_CONTROL_BATCHES};
   /// Randomization seed.
   uint64_t seed {static_cast<uint64_t>(time(NULL))};
   /// Structure holding random devices per vehicle.
@@ -147,8 +151,12 @@ public:
   /// To release the traffic manager.
   void Release();
 
-  /// To reset the traffic manager.
-  void Reset();
+  /// To reset the traffic manager for the episode @a episode_id.
+  void Reset(uint64_t episode_id);
+
+  std::vector<ActorPtr> TakeReleasedActors() {
+    return registered_vehicles.TakeReleased();
+  }
 
   /// This method registers a vehicle with the traffic manager.
   void RegisterVehicles(const std::vector<ActorPtr> &actor_list);
@@ -267,15 +275,6 @@ public:
 
   /// Method to update an already set route.
   void UpdateImportedRoute(const ActorId &actor_id, const Route route);
-
-  /// Method to set automatic respawn of dormant vehicles.
-  void SetRespawnDormantVehicles(const bool mode_switch);
-
-  /// Method to set boundaries to respawn of dormant vehicles.
-  void SetBoundariesRespawnDormantVehicles(const float lower_bound, const float upper_bound);
-
-  /// Method to set limits for boundaries when respawning dormant vehicles.
-  void SetMaxBoundaries(const float lower, const float upper);
 
   /// Method to get the vehicle's next action.
   Action GetNextAction(const ActorId &actor_id);
