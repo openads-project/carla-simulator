@@ -4,13 +4,19 @@ services:
     image: ghcr.io/openads-project/carla-simulator:server-slim_v0.10.0-1.1.1
     environment:
       CARLA_PORT: 2000
+      # The native ROS 2 interface runs on Zenoh and needs a Zenoh router (rmw_zenohd).
+      # ZENOH_CONFIG_OVERRIDE patches individual keys of the Zenoh session config
+      # shipped with CARLA (peer mode, tcp/localhost:7447).
+      ZENOH_CONFIG_OVERRIDE: >-
+        connect/endpoints=["tcp/zenoh-router:7447"]
     command:
       - /bin/bash
       - -ic
       - |
-        ./Linux/CarlaUnreal.sh \
+        ./CarlaUnreal.sh \
           -nosound \
           --ros2 \
+          --rmw=zenoh \
           -carla-rpc-port=$${CARLA_PORT}
     expose:
       - "2000"
@@ -31,8 +37,9 @@ services:
       - /bin/bash
       - -ic
       - |
-        ./Linux/CarlaUnreal.sh \
+        ./CarlaUnreal.sh \
           -nosound \
           -RenderOffScreen \
           --ros2 \
+          --rmw=zenoh \
           -carla-rpc-port=$${CARLA_PORT}
