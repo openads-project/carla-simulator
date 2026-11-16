@@ -719,8 +719,9 @@ set (
   CARLA_SLIM_MAPS
   /Game/Carla/Maps/Town10HD_Opt
   /Game/Carla/Maps/OpenDriveMap
-  /Game/Carla/Maps/aldenhoven/aldenhoven
-  /Game/Carla/Maps/campus/campus
+  # TODO(openads): re-enable once the OpenADS content overlay is migrated to UE 5.8.
+  # /Game/Carla/Maps/aldenhoven/aldenhoven
+  # /Game/Carla/Maps/campus/campus
 )
 add_carla_ue_package_target(
   Slim Shipping Slim Slim "${CARLA_SLIM_MAPS}" TRUE)
