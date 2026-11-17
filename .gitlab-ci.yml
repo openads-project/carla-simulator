@@ -13,7 +13,9 @@ variables:
   # One volume per engine generation: the engine is only built when the volume
   # holds no editor binary yet.
   UE_VOLUME: "carla-ue58-engine-24.04"
-  CARLA_CONTENT_BRANCH: "ue5"
+  # OpenADS content (fb-fi/simulation/carla/carla-content) merged on top of the
+  # official content; see Util/SetupUtils/ContentOverlayExclude.txt for what is left out.
+  CARLA_CONTENT_BRANCH: "ue58"
   # Official CARLA content (branch or tag of bitbucket.org/carla-simulator/carla-content).
   CARLA_CONTENT_BASE_REF: "1.0"
   # The NVIDIA DLSS SDK (ray-traced lens cameras, DLSS upscaling) is not used.
@@ -185,16 +187,14 @@ build-carla:
       rm -rf Unreal/CarlaUnreal/content-openads
       git clone -b "${CARLA_CONTENT_BASE_REF}" --depth 1 https://bitbucket.org/carla-simulator/carla-content.git Unreal/CarlaUnreal/Content/Carla
 
-      # TODO(openads): re-enable once the OpenADS content overlay is migrated to UE 5.8.
-      # git clone \
-      #   --single-branch --depth 1 -b "${CARLA_CONTENT_BRANCH}" \
-      #   "https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.ika.rwth-aachen.de/fb-fi/simulation/carla/carla-content.git" \
-      #   Unreal/CarlaUnreal/content-openads
-      # python3 Util/SetupUtils/MergeContentOverlay.py \
-      #   --base Unreal/CarlaUnreal/Content/Carla \
-      #   --overlay Unreal/CarlaUnreal/content-openads/Carla
-      # echo "Merged content target tree: Unreal/CarlaUnreal/Content/Carla"
-      # find Unreal/CarlaUnreal/Content/Carla -print | sort
+      git clone \
+        --single-branch --depth 1 -b "${CARLA_CONTENT_BRANCH}" \
+        "https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.ika.rwth-aachen.de/fb-fi/simulation/carla/carla-content.git" \
+        Unreal/CarlaUnreal/content-openads
+      python3 Util/SetupUtils/MergeContentOverlay.py \
+        --base Unreal/CarlaUnreal/Content/Carla \
+        --overlay Unreal/CarlaUnreal/content-openads/Carla \
+        --exclude-file Util/SetupUtils/ContentOverlayExclude.txt
 
       cmake --preset Release -DENABLE_ROS2=ON -DBUILD_LIBCARLA_TESTS=ON -DCARLA_DLSS_SDK_PATH=disabled
 

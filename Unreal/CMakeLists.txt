@@ -715,13 +715,14 @@ add_carla_ue_package_target(Debug Debug)
 add_carla_ue_package_target(DebugGame DebugGame)
 add_carla_ue_package_target(Development Development)
 add_carla_ue_package_target(Test Test)
+# Maps of the slim package; keep Config/Custom/Slim/DefaultGame.ini in sync.
+# aldenhoven and campus come from the OpenADS content overlay.
 set (
   CARLA_SLIM_MAPS
   /Game/Carla/Maps/Town10HD_Opt
   /Game/Carla/Maps/OpenDriveMap
-  # TODO(openads): re-enable once the OpenADS content overlay is migrated to UE 5.8.
-  # /Game/Carla/Maps/aldenhoven/aldenhoven
-  # /Game/Carla/Maps/campus/campus
+  /Game/Carla/Maps/aldenhoven/aldenhoven
+  /Game/Carla/Maps/campus/campus
 )
 add_carla_ue_package_target(
   Slim Shipping Slim Slim "${CARLA_SLIM_MAPS}" TRUE)
