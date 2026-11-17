@@ -1,6 +1,6 @@
 # OpenADS specific changes
 
-Based on CARLA 1.0 (Unreal Engine 5.8). Changes that upstream has adopted since are no longer listed here: the UE5 sky for generated OpenDRIVE worlds, the GNSS latitude direction, the pedestrian walk-speed limit, the linear steering input, the bicycles with their riders, Python 3.12 and the Dockerfile inside the package.
+Based on CARLA 1.0.0 (upstream tag `1.0`, Unreal Engine 5.8). Changes that upstream has adopted since are no longer listed here: the UE5 sky for generated OpenDRIVE worlds, the GNSS latitude direction, the pedestrian walk-speed limit, the linear steering input, the bicycles with their riders, Python 3.12 and the Dockerfile inside the package.
 
 - Added independently installable CARLA server and client Helm charts under `deployment/helm`, using the shared OpenADS `openadservice` chart.
 - Added separate Docker Compose service definitions for the CARLA server and client under `deployment/compose`.

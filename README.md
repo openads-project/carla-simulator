@@ -6,7 +6,7 @@
   <a href="https://github.com/openads-project/carla-simulator/blob/main/LICENSE"><img src="https://img.shields.io/github/license/openads-project/carla-simulator"/></a>
   <br>
   <img src="https://img.shields.io/badge/Ubuntu-24.04-E95420"/>
-  <img src="https://img.shields.io/badge/CARLA-1.0-blueviolet"/>
+  <img src="https://img.shields.io/badge/CARLA-1.0.0-blueviolet"/>
   <img src="https://img.shields.io/badge/Python-3.12-blueviolet"/>
   <a href="https://www.ros.org"><img src="https://img.shields.io/badge/ROS 2-jazzy-22314e"/></a>
   <a href="https://github.com/openads-project/carla-simulator/actions/workflows/ci-ubuntu.yml"><img src="https://github.com/openads-project/carla-simulator/actions/workflows/ci-ubuntu.yml/badge.svg"/></a>
