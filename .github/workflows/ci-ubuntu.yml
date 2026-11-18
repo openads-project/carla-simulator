@@ -28,8 +28,7 @@ env:
   DOCKER_IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
   # Official CARLA content (branch or tag of bitbucket.org/carla-simulator/carla-content).
   CARLA_CONTENT_REF: "1.0"
-  # OpenADS content merged on top of the official content; see
-  # Util/SetupUtils/ContentOverlayExclude.txt for what is left out.
+  # OpenADS content merged on top of the official content.
   CONTENT_OVERLAY: "true"
   CONTENT_OVERLAY_REPOSITORY: "https://gitlab.ika.rwth-aachen.de/fb-fi/simulation/carla/carla-content"
   CONTENT_OVERLAY_BRANCH: "ue58"
@@ -305,8 +304,7 @@ jobs:
             git -C Unreal/CarlaUnreal/content-openads remote set-url origin "$CARLA_CONTENT_REPOSITORY"
             python3 Util/SetupUtils/MergeContentOverlay.py \
               --base Unreal/CarlaUnreal/Content/Carla \
-              --overlay Unreal/CarlaUnreal/content-openads/Carla \
-              --exclude-file Util/SetupUtils/ContentOverlayExclude.txt
+              --overlay Unreal/CarlaUnreal/content-openads/Carla
           fi
 
           cmake --preset Release -DENABLE_ROS2=ON -DBUILD_LIBCARLA_TESTS=ON -DCARLA_DLSS_SDK_PATH=disabled

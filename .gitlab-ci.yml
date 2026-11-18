@@ -14,7 +14,7 @@ variables:
   # holds no editor binary yet.
   UE_VOLUME: "carla-ue58-engine-24.04"
   # OpenADS content (fb-fi/simulation/carla/carla-content) merged on top of the
-  # official content; see Util/SetupUtils/ContentOverlayExclude.txt for what is left out.
+  # official content.
   CARLA_CONTENT_BRANCH: "ue58"
   # Official CARLA content (branch or tag of bitbucket.org/carla-simulator/carla-content).
   CARLA_CONTENT_BASE_REF: "1.0"
@@ -193,8 +193,7 @@ build-carla:
         Unreal/CarlaUnreal/content-openads
       python3 Util/SetupUtils/MergeContentOverlay.py \
         --base Unreal/CarlaUnreal/Content/Carla \
-        --overlay Unreal/CarlaUnreal/content-openads/Carla \
-        --exclude-file Util/SetupUtils/ContentOverlayExclude.txt
+        --overlay Unreal/CarlaUnreal/content-openads/Carla
 
       cmake --preset Release -DENABLE_ROS2=ON -DBUILD_LIBCARLA_TESTS=ON -DCARLA_DLSS_SDK_PATH=disabled
 
