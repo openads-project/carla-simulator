@@ -405,9 +405,68 @@ void ACarlaWheeledVehicle::ResolveRiderComponentsIfNeeded()
   RiderMeshComponent->RegisterOnBoneTransformsFinalizedDelegate(
       FOnBoneTransformsFinalizedMultiCast::FDelegate::CreateUObject(
           this, &ACarlaWheeledVehicle::OnRiderBoneTransformsFinalized));
+
+  // The rider's Anim Blueprint places hips, hands and feet at world-space
+  // targets, converted with the rider component's transform at that moment.
+  // Ticking before physics, both the targets and the component lagged one
+  // physics step behind the bike the cameras render, so everything placed by
+  // IK trailed it by speed x frame time: hands behind and below the grips,
+  // feet off the pedals, invisible only when standing. Evaluate the rider
+  // after physics instead, right after RiderSyncTick has re-cached the
+  // sockets and put the rider component on the seat the bike has now.
+  RiderSyncTick.Vehicle = this;
+  RiderSyncTick.TickGroup = TG_PostPhysics;
+  RiderSyncTick.bCanEverTick = true;
+  RiderSyncTick.bStartWithTickEnabled = true;
+  RiderSyncTick.RegisterTickFunction(GetLevel());
+  RiderMeshComponent->SetTickGroup(TG_PostPhysics);
+  RiderMeshComponent->PrimaryComponentTick.AddPrerequisite(this, RiderSyncTick);
+}
+
+void FRiderSyncTickFunction::ExecuteTick(
+    float DeltaTime,
+    ELevelTick TickType,
+    ENamedThreads::Type CurrentThread,
+    const FGraphEventRef &MyCompletionGraphEvent)
+{
+  if (IsValid(Vehicle))
+  {
+    Vehicle->SyncRiderToVehicle();
+  }
+}
+
+FVector ACarlaWheeledVehicle::GetRiderHandTargetWorldLocation(bool bLeftHand) const
+{
+  static const FName HandlerLeftSocket(TEXT("HandlerLeftSocket"));
+  static const FName HandlerRightSocket(TEXT("HandlerRightSocket"));
+  const FTransform Handler =
+      GetCachedVehicleSocketWorldTransform(bLeftHand ? HandlerLeftSocket : HandlerRightSocket);
+  const FVector Offset(
+      RiderWristOffset.X,
+      bLeftHand ? -RiderWristOffset.Y : RiderWristOffset.Y,
+      RiderWristOffset.Z);
+  return Handler.GetLocation() + GetActorQuat().RotateVector(Offset);
+}
+
+FVector ACarlaWheeledVehicle::GetRiderFootTargetWorldLocation(bool bLeftFoot) const
+{
+  static const FName LeftPedalSocket(TEXT("LeftPedalSocket"));
+  static const FName RightPedalSocket(TEXT("RightPedalSocket"));
+  const FTransform Pedal =
+      GetCachedVehicleSocketWorldTransform(bLeftFoot ? LeftPedalSocket : RightPedalSocket);
+  const FVector Offset(
+      RiderFootOffset.X,
+      bLeftFoot ? -RiderFootOffset.Y : RiderFootOffset.Y,
+      RiderFootOffset.Z);
+  return Pedal.GetLocation() + GetActorQuat().RotateVector(Offset);
 }
 
 void ACarlaWheeledVehicle::OnRiderBoneTransformsFinalized()
+{
+  SyncRiderToVehicle();
+}
+
+void ACarlaWheeledVehicle::SyncRiderToVehicle()
 {
   if ((RiderMeshComponent == nullptr) || (VehicleMeshForRiderSeat == nullptr))
   {
@@ -497,8 +556,10 @@ void ACarlaWheeledVehicle::OnRiderBoneTransformsFinalized()
     SmoothedVehicleMeshTransform = CachedVehicleMeshTransform;
     bSmoothedVehicleMeshTransformInitialized = true;
   }
-  else if (const UWorld* World = GetWorld())
+  else if (const UWorld* World = (RiderSmoothingFrame != GFrameCounter) ? GetWorld() : nullptr)
   {
+    // Runs twice per frame (RiderSyncTick, then after the rider's
+    // animation).
     const float FrameDeltaTime = World->GetDeltaSeconds();
 
     FVector SmoothedTranslation = CachedVehicleMeshTransform.GetTranslation();
@@ -522,6 +583,8 @@ void ACarlaWheeledVehicle::OnRiderBoneTransformsFinalized()
   // unsmoothed read here would still show the suspension jitter on the
   // rider's hips/torso regardless of how smooth the AnimGraph's own IK
   // reads are.
+  RiderSmoothingFrame = GFrameCounter;
+
   const FTransform SeatWorldTransform = GetCachedVehicleSocketWorldTransform(VehicleMeshSeatSocketName);
   const FTransform TargetTransform = FTransform(RiderSeatRelativeRotationOffset) * SeatWorldTransform;
   RiderMeshComponent->SetWorldTransform(TargetTransform);
@@ -1717,6 +1780,10 @@ void ACarlaWheeledVehicle::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
   ShowDebugTelemetry(false);
   DisarmSeedRewrite();
+  if (RiderSyncTick.IsTickFunctionRegistered())
+  {
+    RiderSyncTick.UnRegisterTickFunction();
+  }
   Super::EndPlay(EndPlayReason);
   RemoveReferenceToManager();
 }
