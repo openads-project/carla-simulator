@@ -11,6 +11,8 @@ Based on CARLA 1.0.0 (upstream tag `1.0`, Unreal Engine 5.8). Changes that upstr
 - Added a dedicated CARLA PythonAPI client image; the release image starts the server offscreen with native ROS 2 enabled.
 - Enabled ROS 2 actor control for vehicles using `role_name=ego_vehicle`.
 - Updated vehicle steering physics to use `Ackermann` steering geometry for Chaos vehicles; two-wheeled vehicles keep the `SingleAngle` steering of their blueprint.
+- Fixed the rider of two-wheeled vehicles trailing the vehicle while it moves: the rider's animation now evaluates after physics toa lign with the rider with the vehicle.
+- Added rider hand and foot settings for two-wheeled vehicles: `RiderWristOffset` moves the hand IK target off the handlebar socket, `RiderLeftHandRotation` and `RiderRightHandRotation` turn the hands around the grips; `RiderFootOffset` moves the foot IK target off the pedal axle and `RiderLeftFootRotation`/`RiderRightFootRotation` set the foot angle, so the ball of the foot rests on the pedal.
 - Added ROS 2 native Odometry and TF sensors publishing `nav_msgs/Odometry` and `tf2_msgs/TFMessage`.
 - Added the `ignore_altitude` and `ignore_tilt` attributes to Odometry and TF sensors, and `ignore_tilt` to the IMU sensor.
 - Updated ROS 2 transform publishing with actor and sensor parent relationships, dynamic transforms on `/tf`, static transforms for attached sensors on `/tf_static` (latched and repeated once per second of simulation time), and `carla_map` as the root frame.

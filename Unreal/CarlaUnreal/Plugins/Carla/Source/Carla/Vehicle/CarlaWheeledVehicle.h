@@ -48,6 +48,24 @@
 
 class UBoxComponent;
 class UChaosVehicleWheel;
+class ACarlaWheeledVehicle;
+
+/// Two-wheelers: puts the rider on the seat after physics, before its animation.
+struct FRiderSyncTickFunction : public FTickFunction
+{
+  ACarlaWheeledVehicle *Vehicle = nullptr;
+
+  virtual void ExecuteTick(
+      float DeltaTime,
+      ELevelTick TickType,
+      ENamedThreads::Type CurrentThread,
+      const FGraphEventRef &MyCompletionGraphEvent) override;
+
+  virtual FString DiagnosticMessage() override
+  {
+    return TEXT("FRiderSyncTickFunction");
+  }
+};
 
 UENUM()
 enum class EVehicleWheelLocation : uint8 {
@@ -403,6 +421,42 @@ public:
   UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CARLA Wheeled Vehicle|Rider")
   FRotator RiderSeatRelativeRotationOffset = FRotator(0.0f, -90.0f, 15.0f);
 
+  /// Wrist position relative to the handlebar socket, in cm in the vehicle frame
+  /// (X forward, Y outward, Z up; mirrored for the left hand).
+  UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CARLA Wheeled Vehicle|Rider")
+  FVector RiderWristOffset = FVector::ZeroVector;
+
+  /// Rotation added to the left hand in bone space, after the arm IK (AB_Biker).
+  UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CARLA Wheeled Vehicle|Rider")
+  FRotator RiderLeftHandRotation = FRotator::ZeroRotator;
+
+  /// As RiderLeftHandRotation; the same value on both hands gives a mirrored grip.
+  UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CARLA Wheeled Vehicle|Rider")
+  FRotator RiderRightHandRotation = FRotator::ZeroRotator;
+
+  /// Hand IK target: the cached handlebar socket moved by RiderWristOffset.
+  UFUNCTION(BlueprintPure, Category = "CARLA Wheeled Vehicle|Rider")
+  FVector GetRiderHandTargetWorldLocation(bool bLeftHand) const;
+
+  /// Ankle position relative to the pedal socket (the axle), in cm in the vehicle
+  /// frame, mirrored for the left foot; puts the ball of the foot on the pedal.
+  /// AB_Biker adds its PedalsZOfset on top.
+  UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CARLA Wheeled Vehicle|Rider")
+  FVector RiderFootOffset = FVector::ZeroVector;
+
+  /// Rotation added to the left foot in bone space, after the leg IK (AB_Biker);
+  /// sets the foot angle for the whole pedal stroke.
+  UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CARLA Wheeled Vehicle|Rider")
+  FRotator RiderLeftFootRotation = FRotator::ZeroRotator;
+
+  /// As RiderLeftFootRotation.
+  UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CARLA Wheeled Vehicle|Rider")
+  FRotator RiderRightFootRotation = FRotator::ZeroRotator;
+
+  /// Foot IK target: the cached pedal socket moved by RiderFootOffset.
+  UFUNCTION(BlueprintPure, Category = "CARLA Wheeled Vehicle|Rider")
+  FVector GetRiderFootTargetWorldLocation(bool bLeftFoot) const;
+
   /// Two-wheeled vehicles spin a decorative pedal/crank bone (in the
   /// vehicle mesh's own Anim Blueprint, unrelated to the rider) via a
   /// looping Timeline whose curve doesn't start and end at the same
@@ -620,6 +674,16 @@ private:
   // RiderMeshComponentName above for why this runs there and not from
   // TickActor.
   void OnRiderBoneTransformsFinalized();
+
+  // Re-caches the vehicle sockets and seats the rider; from RiderSyncTick and
+  // OnRiderBoneTransformsFinalized.
+  void SyncRiderToVehicle();
+
+  friend struct FRiderSyncTickFunction;
+  FRiderSyncTickFunction RiderSyncTick;
+
+  // Frame of the last seat smoothing step (once per frame).
+  uint64 RiderSmoothingFrame = 0;
 
   // Backing values for GetCachedVehicleSocketWorldTransform() above --
   // every vehicle-mesh socket's transform as of the last cache update, the
