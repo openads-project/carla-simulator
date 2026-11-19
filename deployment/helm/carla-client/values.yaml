@@ -1,6 +1,6 @@
 openadservice:
   name: carla-client
-  image: ghcr.io/openads-project/carla-simulator:client_v0.10.0-1.1.1
+  image: ghcr.io/openads-project/carla-simulator:client_v1.0.0-1.0.0
   gpu: true
   shm: false
   x11Display: ":0"

@@ -9,8 +9,7 @@
 #include "carla/Logging.h"
 #include "carla/ros2/publishers/PublisherImpl.h"
 #include "carla/ros2/publishers/TransformQuaternion.h"
-#include "carla/ros2/types/Odometry.h"
-#include "carla/ros2/types/OdometryPubSubTypes.h"
+#include "carla/ros2/types/msg/Odometry.h"
 
 #include <array>
 #include <cmath>
@@ -20,8 +19,7 @@ namespace carla {
 namespace ros2 {
 
 struct CarlaOdometryMsgTraits {
-  using msg_type = nav_msgs::msg::Odometry;
-  using msg_pubsub_type = nav_msgs::msg::OdometryPubSubType;
+  using msg_type = msg::Odometry;
 };
 
 namespace {
@@ -86,6 +84,7 @@ bool CarlaOdometryPublisher::Publish() {
 bool CarlaOdometryPublisher::Write(
     std::int32_t seconds,
     std::uint32_t nanoseconds,
+    const std::string &frame_id,
     const std::string &child_frame_id,
     float tx, float ty, float tz,
     float pitch_deg, float yaw_deg, float roll_deg,
@@ -96,28 +95,28 @@ bool CarlaOdometryPublisher::Write(
       pitch_deg, yaw_deg, roll_deg);
 
   auto *message = _impl->GetMessage();
-  message->header().stamp().sec(seconds);
-  message->header().stamp().nanosec(nanoseconds);
-  message->header().frame_id("carla_map");
-  message->child_frame_id(child_frame_id.empty() ? GetFrameId() : child_frame_id);
+  message->header.stamp.sec = seconds;
+  message->header.stamp.nanosec = nanoseconds;
+  message->header.frame_id = frame_id;
+  message->child_frame_id = child_frame_id.empty() ? GetFrameId() : child_frame_id;
 
-  message->pose().pose().position().x(transform.translation[0]);
-  message->pose().pose().position().y(transform.translation[1]);
-  message->pose().pose().position().z(transform.translation[2]);
-  message->pose().pose().orientation().w(transform.rotation[0]);
-  message->pose().pose().orientation().x(transform.rotation[1]);
-  message->pose().pose().orientation().y(transform.rotation[2]);
-  message->pose().pose().orientation().z(transform.rotation[3]);
+  message->pose.pose.position.x = transform.translation[0];
+  message->pose.pose.position.y = transform.translation[1];
+  message->pose.pose.position.z = transform.translation[2];
+  message->pose.pose.orientation.w = transform.rotation[0];
+  message->pose.pose.orientation.x = transform.rotation[1];
+  message->pose.pose.orientation.y = transform.rotation[2];
+  message->pose.pose.orientation.z = transform.rotation[3];
 
   const auto linear = CarlaVectorToRosVectorRotated(
       linear_x, linear_y, linear_z, pitch_deg, yaw_deg, roll_deg);
   const auto angular = CarlaAngularVelocityToRosVector(angular_x, angular_y, angular_z);
-  message->twist().twist().linear().x(linear[0]);
-  message->twist().twist().linear().y(linear[1]);
-  message->twist().twist().linear().z(linear[2]);
-  message->twist().twist().angular().x(angular[0]);
-  message->twist().twist().angular().y(angular[1]);
-  message->twist().twist().angular().z(angular[2]);
+  message->twist.twist.linear.x = linear[0];
+  message->twist.twist.linear.y = linear[1];
+  message->twist.twist.linear.z = linear[2];
+  message->twist.twist.angular.x = angular[0];
+  message->twist.twist.angular.y = angular[1];
+  message->twist.twist.angular.z = angular[2];
   return true;
 }
 

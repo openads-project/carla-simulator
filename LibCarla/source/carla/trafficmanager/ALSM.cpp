@@ -5,6 +5,7 @@
 
 #include "boost/pointer_cast.hpp"
 
+#include "carla/Logging.h"
 #include "carla/client/Actor.h"
 #include "carla/client/Vehicle.h"
 #include "carla/client/Walker.h"
@@ -178,24 +179,37 @@ void ALSM::UpdateRegisteredActorsData(const bool hybrid_physics_mode, ALSM::Idle
   bool hero_actor_present = hero_actors.size() != 0u;
   float physics_radius = parameters.GetHybridPhysicsRadius();
   float physics_radius_square = SQUARE(physics_radius);
-  bool is_respawn_vehicles = parameters.GetRespawnDormantVehicles();
-  if (is_respawn_vehicles && !hero_actor_present) {
-    track_traffic.SetHeroLocation(cg::Location(0,0,0));
-  }
+  // A vehicle can die after the snapshot (destroyed through its handle, or by a map load): drop it, don't throw.
+  std::vector<ActorId> vanished_heroes;
+  std::vector<ActorId> vanished_vehicles;
   // Update first the information regarding any hero vehicle.
   for (auto &hero_actor_info: hero_actors){
-    if (is_respawn_vehicles) {
-      track_traffic.SetHeroLocation(hero_actor_info.second->GetTransform().location);
+    try {
+      UpdateData(hybrid_physics_mode, hero_actor_info.second, hero_actor_present, physics_radius_square);
+    } catch (const std::exception &e) {
+      log_debug("Traffic Manager: dropping hero vehicle", hero_actor_info.first, ":", e.what());
+      vanished_heroes.push_back(hero_actor_info.first);
     }
-    UpdateData(hybrid_physics_mode, hero_actor_info.second, hero_actor_present, physics_radius_square);
   }
   // Update information for all other registered vehicles.
   for (const Actor &vehicle : vehicle_list) {
     ActorId actor_id = vehicle->GetId();
     if (hero_actors.find(actor_id) == hero_actors.end()) {
-      UpdateData(hybrid_physics_mode, vehicle, hero_actor_present, physics_radius_square);
+      try {
+        UpdateData(hybrid_physics_mode, vehicle, hero_actor_present, physics_radius_square);
+      } catch (const std::exception &e) {
+        log_debug("Traffic Manager: dropping vehicle", actor_id, ":", e.what());
+        vanished_vehicles.push_back(actor_id);
+        continue;
+      }
       UpdateIdleTime(max_idle_time, actor_id);
     }
+  }
+  for (const ActorId actor_id : vanished_heroes) {
+    RemoveActor(actor_id, false);
+  }
+  for (const ActorId actor_id : vanished_vehicles) {
+    RemoveActor(actor_id, true);
   }
 }
 
@@ -254,7 +268,7 @@ void ALSM::UpdateData(const bool hybrid_physics_mode, const Actor &vehicle,
   auto vehicle_ptr = std::static_pointer_cast<cc::Vehicle>(vehicle);
   KinematicState kinematic_state{vehicle_location, vehicle_rotation,
                                   vehicle_velocity, vehicle_ptr->GetSpeedLimit(),
-                                  enable_physics, vehicle->IsDormant(), cg::Location()};
+                                  enable_physics, cg::Location()};
 
   // Updated traffic light state object.
   TrafficLightState tl_state = {vehicle_ptr->GetTrafficLightState(), vehicle_ptr->IsAtTrafficLight()};
@@ -267,6 +281,20 @@ void ALSM::UpdateData(const bool hybrid_physics_mode, const Actor &vehicle,
   else {
     cg::Vector3D dimensions = vehicle_ptr->GetBoundingBox().extent;
     StaticAttributes attributes{ActorType::Vehicle, dimensions.x, dimensions.y, dimensions.z};
+
+    // One-time query of the physical steering lock: the motion-plan stage
+    // normalizes steering authority (gains and envelope) by it. Guarded so a
+    // failed RPC (e.g. the actor died this frame) falls back to the default.
+    try {
+      const auto physics_control = vehicle_ptr->GetPhysicsControl();
+      float max_steer_angle = 0.0f;
+      for (const auto &wheel : physics_control.wheels) {
+        max_steer_angle = std::max(max_steer_angle, wheel.max_steer_angle);
+      }
+      if (max_steer_angle > 1.0f) {
+        attributes.max_steer_angle = max_steer_angle;
+      }
+    } catch (const std::exception &) {}
 
     simulation_state.AddActor(actor_id, kinematic_state, attributes, tl_state);
   }
@@ -284,8 +312,7 @@ void ALSM::UpdateUnregisteredActorsData() {
     const cg::Location actor_location = actor_transform.location;
     const cg::Rotation actor_rotation = actor_transform.rotation;
     const cg::Vector3D actor_velocity = actor_ptr->GetVelocity();
-    const bool actor_is_dormant = actor_ptr->IsDormant();
-    KinematicState kinematic_state {actor_location, actor_rotation, actor_velocity, -1.0f, true, actor_is_dormant, cg::Location()};
+    KinematicState kinematic_state {actor_location, actor_rotation, actor_velocity, -1.0f, true, cg::Location()};
 
     TrafficLightState tl_state;
     ActorType actor_type = ActorType::Any;
@@ -318,7 +345,9 @@ void ALSM::UpdateUnregisteredActorsData() {
                                            actor_location + cg::Location(-extent.x * heading_vector)};
       for (cg::Location &vertex: corners) {
         SimpleWaypointPtr nearest_waypoint = local_map->GetWaypoint(vertex);
-        nearest_waypoints.push_back(nearest_waypoint);
+        if (nearest_waypoint != nullptr) {
+          nearest_waypoints.push_back(nearest_waypoint);
+        }
       }
     }
     else if (type_id.front() == 'w') {
@@ -336,7 +365,9 @@ void ALSM::UpdateUnregisteredActorsData() {
 
       // Identify occupied waypoints.
       SimpleWaypointPtr nearest_waypoint = local_map->GetWaypoint(actor_location);
-      nearest_waypoints.push_back(nearest_waypoint);
+      if (nearest_waypoint != nullptr) {
+        nearest_waypoints.push_back(nearest_waypoint);
+      }
     }
 
     track_traffic.UpdateUnregisteredGridPosition(actor_id, nearest_waypoints);

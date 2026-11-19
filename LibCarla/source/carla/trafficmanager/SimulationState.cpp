@@ -82,10 +82,6 @@ bool SimulationState::IsPhysicsEnabled(ActorId actor_id) const {
   return kinematic_state_map.at(actor_id).physics_enabled;
 }
 
-bool SimulationState::IsDormant(ActorId actor_id) const {
-  return kinematic_state_map.at(actor_id).is_dormant;
-}
-
 TrafficLightState SimulationState::GetTLS(ActorId actor_id) const {
   return tl_state_map.at(actor_id);
 }
@@ -97,6 +93,11 @@ ActorType SimulationState::GetType(ActorId actor_id) const {
 cg::Vector3D SimulationState::GetDimensions(ActorId actor_id) const {
   const StaticAttributes &attributes = static_attribute_map.at(actor_id);
   return cg::Vector3D(attributes.half_length, attributes.half_width, attributes.half_height);
+}
+
+float SimulationState::GetMaxSteerAngle(ActorId actor_id) const {
+  const StaticAttributes &attributes = static_attribute_map.at(actor_id);
+  return attributes.max_steer_angle;
 }
 
 } // namespace  traffic_manager

@@ -32,12 +32,11 @@ USER root
 # - build-essential make ninja-build: core compilation tools
 # - libvulkan1: Vulkan runtime needed by Unreal Engine for rendering
 # - python3 python3-dev python3-pip python-is-python3: Python runtime, headers, package manager
-# - software-properties-common: temporarily required to add the Python 3.12 package repository on Ubuntu 22.04
 # - autoconf libtool: required for building dependencies from source
 # - wget curl rsync unzip git git-lfs: essential CLI tools used in CARLA build scripts
 # - libpng-dev libtiff5-dev libjpeg-dev: image libraries for CARLA's Python API
 # - tzdata sed libxml2-dev: build utilities
-# - libnss3-dev libatk-bridge2.0-dev libxkbcommon-dev libgbm-dev: required by UE5 editor
+# - libnss3-dev libatk-bridge2.0-dev libxkbcommon-dev libgbm-dev libxcomposite1 libxdamage1: required by UE5 editor
 # - libpango1.0-dev libasound2-dev: display and audio support for UE5
 RUN apt-get update && \
     apt-get install -y \
@@ -49,7 +48,6 @@ RUN apt-get update && \
         python3-dev \
         python3-pip \
         python-is-python3 \
-        software-properties-common \
         autoconf \
         libtool \
         wget \
@@ -68,17 +66,10 @@ RUN apt-get update && \
         libatk-bridge2.0-dev \
         libxkbcommon-dev \
         libgbm-dev \
+        libxcomposite1 \
+        libxdamage1 \
         libpango1.0-dev \
         libasound2-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update \
-    && apt-get install -y \
-        python3.12 \
-        python3.12-dev \
-        python3.12-venv \
-    && apt-get purge -y --auto-remove software-properties-common \
     && rm -rf /var/lib/apt/lists/*
 
 # Enable git lfs
@@ -106,14 +97,10 @@ RUN packages='libsdl2-dev libsdl2-2.0' \
 RUN echo '[global]' > /etc/pip.conf && \
     echo 'break-system-packages = true' >> /etc/pip.conf
 
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py \
-    && python3 /tmp/get-pip.py --break-system-packages \
-    && python3.12 /tmp/get-pip.py --break-system-packages \
-    && rm /tmp/get-pip.py \
-    && python3 -m pip install --upgrade pip \
+# --ignore-installed: the pip that Ubuntu 24.04 installs is managed by apt and
+# cannot be uninstalled by pip; the upgraded one goes to /usr/local and wins.
+RUN python3 -m pip install --upgrade --ignore-installed pip \
     && python3 -m pip install -r /tmp/requirements.txt \
-    && python3.12 -m pip install --upgrade pip \
-    && python3.12 -m pip install -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 
 USER root

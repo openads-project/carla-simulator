@@ -22,7 +22,9 @@ struct CarlaTransformMsgTraits;
 
 // Publishes tf2_msgs::msg::TFMessage to the global "rt/tf" or "rt/tf_static"
 // topic. Each sensor owns its own instance and contributes one
-// TransformStamped per tick; subscribers see the full set fanned out. Callers
+// TransformStamped per tick; subscribers see the full set fanned out. A
+// static publisher sends its transform latched and repeats it once per second
+// of simulation time instead of on every tick. Callers
 // hand in raw float translation + Euler degrees so the header does not
 // include carla::geom::Transform (pulls MsgPack + Boost via
 // carla/MsgPack.h — neither is on the include path of the
@@ -70,6 +72,11 @@ private:
   std::unordered_map<std::string, CachedTransform> _last_transforms;
   bool _is_static{false};
   bool _has_published{false};
+  // Static transforms only: set by Write() when the staged sample has to go
+  // out, i.e. the first one, a changed one, or the periodic repeat.
+  bool _static_publish_due{false};
+  double _pending_static_time{0.0};
+  double _last_static_publish{0.0};
 };
 
 }  // namespace ros2

@@ -13,6 +13,10 @@ RUN packages='xdg-user-dirs' \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y $packages \
     && rm -rf /var/lib/apt/lists/*
 
+# Starting with Ubuntu 23.04, official Docker images include a default `ubuntu` user with UID 1000.
+# Remove it so that the carla user keeps UID 1000, as on Ubuntu 22.04.
+RUN id -u ubuntu > /dev/null 2>&1 && userdel -r ubuntu || true
+
 RUN useradd -m carla
 
 WORKDIR /workspace
@@ -25,4 +29,4 @@ ENV NVIDIA_DRIVER_CAPABILITIES=all
 ENV SDL_VIDEODRIVER="x11"
 
 # You can also run CARLA in offscreen mode with -RenderOffScreen
-CMD ["/bin/bash", "Linux/CarlaUnreal.sh", "-RenderOffScreen", "--ros2"]
+CMD ["/bin/bash", "CarlaUnreal.sh", "-RenderOffScreen", "--ros2"]

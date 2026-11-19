@@ -6,8 +6,12 @@
 
 #include "carla/client/WalkerAIController.h"
 
+#include "carla/Exception.h"
+#include "carla/Logging.h"
 #include "carla/client/detail/Simulator.h"
 #include "carla/client/detail/WalkerNavigation.h"
+
+#include <stdexcept>
 
 namespace carla {
 namespace client {
@@ -16,36 +20,74 @@ namespace client {
     : Actor(std::move(init)) {}
 
   void WalkerAIController::Start() {
-    GetEpisode().Lock()->RegisterAIController(*this);
+    auto simulator = GetEpisode().Lock();
+    if (simulator->IsNavigationServerSide()) {
+      // Server-side navigation: the walker keeps physics and collisions on;
+      // the server's crowd controller drives its CharacterMovement directly.
+      auto walker = GetParent();
+      if (walker == nullptr) {
+        throw_exception(std::runtime_error(GetDisplayId() + ": not attached to walker"));
+        return;
+      }
+      if (!simulator->WalkerStartNavigation(walker->GetId())) {
+        log_warning("NAV: server failed to start navigation for walker", walker->GetId());
+      }
+      return;
+    }
+
+    simulator->RegisterAIController(*this);
 
     // add the walker in the Recast & Detour
     auto walker = GetParent();
     if (walker != nullptr) {
-      auto nav = GetEpisode().Lock()->GetNavigation();
+      auto nav = simulator->GetNavigation();
       if (nav != nullptr) {
         nav->AddWalker(walker->GetId(), walker->GetLocation());
-        // disable physics and collision of walker actor
-        GetEpisode().Lock()->SetActorSimulatePhysics(*walker, false);
-        GetEpisode().Lock()->SetActorCollisions(*walker, false);
+        // The crowd teleports the walker; keep its collision on or sensors miss it (#10068).
+        simulator->SetActorSimulatePhysics(*walker, false);
       }
     }
   }
 
   void WalkerAIController::Stop() {
-    GetEpisode().Lock()->UnregisterAIController(*this);
+    auto simulator = GetEpisode().Lock();
+    if (simulator->IsNavigationServerSide()) {
+      auto walker = GetParent();
+      if (walker == nullptr) {
+        throw_exception(std::runtime_error(GetDisplayId() + ": not attached to walker"));
+        return;
+      }
+      if (!simulator->WalkerStopNavigation(walker->GetId())) {
+        log_warning("NAV: server failed to stop navigation for walker", walker->GetId());
+      }
+      return;
+    }
+
+    simulator->UnregisterAIController(*this);
 
     // remove the walker from the Recast & Detour
     auto walker = GetParent();
     if (walker != nullptr) {
-      auto nav = GetEpisode().Lock()->GetNavigation();
+      auto nav = simulator->GetNavigation();
       if (nav != nullptr) {
         nav->RemoveWalker(walker->GetId());
+        // Restore movement so a stopped walker obeys apply_control() again.
+        try {
+          simulator->SetActorSimulatePhysics(*walker, true);
+        } catch (const std::exception &e) {
+          log_warning("NAV: could not restore movement of walker", walker->GetId(), ":", e.what());
+        }
       }
     }
   }
 
   std::optional<geom::Location> WalkerAIController::GetRandomLocation() {
-    auto nav = GetEpisode().Lock()->GetNavigation();
+    auto simulator = GetEpisode().Lock();
+    if (simulator->IsNavigationServerSide()) {
+      return simulator->GetRandomLocationFromNavigation();
+    }
+
+    auto nav = simulator->GetNavigation();
     if (nav != nullptr) {
       return nav->GetRandomLocation();
     }
@@ -53,7 +95,20 @@ namespace client {
   }
 
   void WalkerAIController::GoToLocation(const carla::geom::Location &destination) {
-    auto nav = GetEpisode().Lock()->GetNavigation();
+    auto simulator = GetEpisode().Lock();
+    if (simulator->IsNavigationServerSide()) {
+      auto walker = GetParent();
+      if (walker != nullptr) {
+        if (!simulator->WalkerGoToLocation(walker->GetId(), destination)) {
+          log_warning("NAV: Failed to set request to go to ", destination.x, destination.y, destination.z);
+        }
+      } else {
+        log_warning("NAV: Failed to set request to go to ", destination.x, destination.y, destination.z, "(parent does not exist)");
+      }
+      return;
+    }
+
+    auto nav = simulator->GetNavigation();
     if (nav != nullptr) {
       auto walker = GetParent();
       if (walker != nullptr) {
@@ -67,7 +122,20 @@ namespace client {
   }
 
   void WalkerAIController::SetMaxSpeed(const float max_speed) {
-    auto nav = GetEpisode().Lock()->GetNavigation();
+    auto simulator = GetEpisode().Lock();
+    if (simulator->IsNavigationServerSide()) {
+      auto walker = GetParent();
+      if (walker != nullptr) {
+        if (!simulator->WalkerSetMaxSpeed(walker->GetId(), max_speed)) {
+          log_warning("NAV: failed to set max speed");
+        }
+      } else {
+        log_warning("NAV: failed to set max speed (parent does not exist)");
+      }
+      return;
+    }
+
+    auto nav = simulator->GetNavigation();
     if (nav != nullptr) {
       auto walker = GetParent();
       if (walker != nullptr) {

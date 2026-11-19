@@ -33,8 +33,6 @@
 
 #include "CarlaGameModeBase.generated.h"
 
-class ASkyBase;
-
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEpisodeInitialisedDelegate, UCarlaEpisode*, InitialisedEpisode);
 
 /// Base class for the CARLA Game Mode.
@@ -83,6 +81,31 @@ public:
   }
 
   void EnableEnvironmentObjects(const TSet<uint64>& EnvObjectIds, bool Enable);
+
+  /// The registered environment objects disabled now, and a count of the
+  /// changes to that set: Multi-GPU secondaries mirror it.
+  const TSet<uint64> &GetDisabledEnvironmentObjects() const
+  {
+    return DisabledEnvironmentObjects;
+  }
+
+  uint64 GetEnvironmentObjectsSerial() const
+  {
+    return EnvironmentObjectsSerial;
+  }
+
+  /// How many times the environment objects were registered (on every map
+  /// layer streamed in or out).
+  uint64 GetEnvironmentObjectsRegistrations() const
+  {
+    return EnvironmentObjectsRegistrations;
+  }
+
+  /// rpc::MapLayer bits of the layers loaded now.
+  int32 GetLoadedMapLayers() const
+  {
+    return LoadedMapLayers;
+  }
 
   void EnableOverlapEvents();
 
@@ -139,19 +162,37 @@ protected:
 
   void Tick(float DeltaSeconds) override;
 
-private:
-
-  void InitializeOpenDriveSky(const FString &MapName);
-
-  void SpawnActorFactories();
+  /// Loads the episode georeference (parsing the map's OpenDRIVE by default)
+  /// and stores the recommended spawn points. Virtual so Autoware maps can
+  /// take the georeference from an MGRS data asset instead (tier4 port).
+  virtual void LoadGeoReference();
 
   void StoreSpawnPoints();
+
+  UPROPERTY()
+  UCarlaEpisode *Episode = nullptr;
+
+private:
+
+  /// Tags actors of World Partition cells as they stream in. The legacy
+  /// ALargeMapManager used to do this for WorldComposition tiles, but it
+  /// retires itself on World Partition maps, which left streamed-in cells
+  /// untagged (semantic segmentation rendered them unlabeled).
+  void OnLevelAddedToWorld(ULevel* InLevel, UWorld* InWorld);
+
+  void SpawnActorFactories();
 
   void GenerateSpawnPoints();
 
   void ParseOpenDrive();
 
+public:
+
+  // Public so map managers can refresh environment objects after relocating
+  // actors (e.g. traffic sign height adjustment).
   void RegisterEnvironmentObjects();
+
+private:
 
   void ConvertMapLayerMaskToMapNames(int32 MapLayer, TArray<FName>& OutLevelNames);
 
@@ -167,9 +208,6 @@ private:
   UCarlaSettingsDelegate *CarlaSettingsDelegate = nullptr;
 
   UPROPERTY()
-  UCarlaEpisode *Episode = nullptr;
-
-  UPROPERTY()
   ACarlaRecorder *Recorder = nullptr;
 
   UPROPERTY()
@@ -178,10 +216,6 @@ private:
   /// The class of Weather to spawn.
   UPROPERTY(Category = "CARLA Game Mode", EditAnywhere)
   TSubclassOf<AWeather> WeatherClass;
-
-  /// The sky class spawned for dynamically generated OpenDRIVE worlds.
-  UPROPERTY(Category = "CARLA Game Mode", EditAnywhere)
-  TSubclassOf<ASkyBase> OpenDriveSkyClass;
 
   /// List of actor spawners that will be used to define and spawn the actors
   /// available in game.
@@ -204,6 +238,14 @@ private:
   std::optional<carla::road::Map> Map;
 
   int PendingLevelsToLoad = 0;
+
+  TSet<uint64> DisabledEnvironmentObjects;
+
+  uint64 EnvironmentObjectsSerial = 0u;
+
+  uint64 EnvironmentObjectsRegistrations = 0u;
+
+  int32 LoadedMapLayers = 0;
   int PendingLevelsToUnLoad = 0;
 
   bool ReadyToRegisterObjects = false;

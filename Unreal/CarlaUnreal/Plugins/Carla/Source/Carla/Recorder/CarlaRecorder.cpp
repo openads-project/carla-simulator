@@ -26,7 +26,6 @@
 #include <util/ue-header-guard-begin.h>
 #include "Components/BoxComponent.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "VehicleAnimationInstance.h"
 #include <util/ue-header-guard-end.h>
 
 #include <ctime>
@@ -87,6 +86,16 @@ void ACarlaRecorder::SetReplayerIgnoreSpectator(bool IgnoreSpectator)
 void ACarlaRecorder::StopReplayer(bool KeepActors)
 {
   Replayer.Stop(KeepActors);
+  // A replay that reached its end stopped itself keeping its actors, so
+  // Stop() alone would leave them: remove what is left on request.
+  if (KeepActors)
+  {
+    Replayer.ForgetSpawnedActors();
+  }
+  else
+  {
+    Replayer.DestroySpawnedActors();
+  }
 }
 
 void ACarlaRecorder::Ticking(float DeltaSeconds)
@@ -108,7 +117,7 @@ void ACarlaRecorder::Ticking(float DeltaSeconds)
     // through all actors in registry
     for (auto It = Registry.begin(); It != Registry.end(); ++It)
     {
-      FCarlaActor* View = It.Value().Get();
+      FCarlaActor* View = It->Value.Get();
 
       switch (View->GetActorType())
       {
@@ -122,7 +131,7 @@ void ACarlaRecorder::Ticking(float DeltaSeconds)
           AddActorPosition(View);
           AddVehicleAnimation(View);
           AddVehicleLight(View);
-          //AddVehicleWheelsAnimation(View);
+          AddVehicleWheelsAnimation(View);
           if (bAdditionalData)
           {
             AddActorKinematics(View);
@@ -215,7 +224,6 @@ void ACarlaRecorder::AddVehicleAnimation(FCarlaActor *CarlaActor)
 
 void ACarlaRecorder::AddVehicleWheelsAnimation(FCarlaActor *CarlaActor)
 {
-#if 0 // @CARLAUE5
   check(CarlaActor != nullptr)
   if (CarlaActor->IsPendingKill())
     return;
@@ -226,31 +234,23 @@ void ACarlaRecorder::AddVehicleWheelsAnimation(FCarlaActor *CarlaActor)
   if (CarlaVehicle == nullptr)
     return;
 
-  USkeletalMeshComponent* SkeletalMesh = CarlaVehicle->GetMesh();
-  if (SkeletalMesh == nullptr)
-    return;
-
-  UVehicleAnimationInstance* VehicleAnim = Cast<UVehicleAnimationInstance>(SkeletalMesh->GetAnimInstance());
-  if (VehicleAnim == nullptr)
-    return;
-
-  const UChaosWheeledVehicleMovementComponent* WheeledVehicleMovementComponent = VehicleAnim->GetWheeledVehicleMovementComponent();
-  if (WheeledVehicleMovementComponent == nullptr)
+  const UChaosWheeledVehicleMovementComponent* Movement = CarlaVehicle->GetChaosWheeledVehicleMovementComponent();
+  if (Movement == nullptr)
     return;
 
   CarlaRecorderAnimWheels Record;
   Record.DatabaseId = CarlaActor->GetActorId();
-  Record.WheelValues.reserve(WheeledVehicleMovementComponent->Wheels.Num());
+  Record.WheelValues.reserve(Movement->WheelSetups.Num());
 
-  uint8 i = 0;
-  for (auto Wheel : WheeledVehicleMovementComponent->Wheels)
+  // The getters return the pose shown, whether Chaos, the animation instance
+  // or the wheel animation override set it.
+  for (uint8 i = 0; CarlaVehicle->HasWheel(i); ++i)
   {
-    WheelInfo Info;
-    Info.Location = static_cast<EVehicleWheelLocation>(i);
-    Info.SteeringAngle = CarlaVehicle->GetWheelSteerAngle(Info.Location);
-    Info.TireRotation = Wheel->GetRotationAngle();
-    Record.WheelValues.push_back(Info);
-    ++i;
+    WheelInfo Wheel;
+    Wheel.Location = static_cast<EVehicleWheelLocation>(i);
+    Wheel.SteeringAngle = CarlaVehicle->GetWheelSteerAngle(Wheel.Location);
+    Wheel.TireRotation = CarlaVehicle->GetWheelPitchAngle(Wheel.Location);
+    Record.WheelValues.push_back(Wheel);
   }
 
   AddAnimVehicleWheels(Record);
@@ -260,11 +260,10 @@ void ACarlaRecorder::AddVehicleWheelsAnimation(FCarlaActor *CarlaActor)
     AddAnimBiker(CarlaRecorderAnimBiker
     {
       CarlaActor->GetActorId(),
-      WheeledVehicleMovementComponent->GetForwardSpeed(),
-      WheeledVehicleMovementComponent->GetEngineRotationSpeed() / WheeledVehicleMovementComponent->GetEngineMaxRotationSpeed()
+      Movement->GetForwardSpeed(),
+      Movement->GetEngineRotationSpeed() / Movement->GetEngineMaxRotationSpeed()
     });
   }
-#endif
 }
 
 void ACarlaRecorder::AddWalkerAnimation(FCarlaActor *CarlaActor)
@@ -764,6 +763,7 @@ void ACarlaRecorder::AddExistingActors(void)
           static_cast<uint8_t>(CarlaActor->GetActorType()),
           CarlaActor->GetActorGlobalTransform(),
           CarlaActor->GetActorInfo()->Description);
+      AddExistingDoors(*CarlaActor);
     }
   }
 
@@ -779,6 +779,36 @@ void ACarlaRecorder::AddExistingActors(void)
     }
   }
 
+}
+
+void ACarlaRecorder::AddExistingDoors(const FCarlaActor &CarlaActor)
+{
+  // Door packets are events: a door open before the recording starts is
+  // recorded as opening in the first frame.
+  if (CarlaActor.GetActorType() != FCarlaActor::ActorType::Vehicle)
+  {
+    return;
+  }
+  uint8 OpenDoors = 0u;
+  if (const ACarlaWheeledVehicle *Vehicle = Cast<ACarlaWheeledVehicle>(CarlaActor.GetActor()))
+  {
+    OpenDoors = Vehicle->GetOpenDoorMask();
+  }
+  else if (const FVehicleData *Data = CarlaActor.GetActorData<FVehicleData>())
+  {
+    OpenDoors = Data->OpenDoorMask;
+  }
+  for (uint8 i = 0u; i < 8u; ++i)
+  {
+    if ((OpenDoors & (1u << i)) != 0u)
+    {
+      CarlaRecorderDoorVehicle DoorVehicle;
+      DoorVehicle.DatabaseId = CarlaActor.GetActorId();
+      DoorVehicle.Doors = static_cast<CarlaRecorderDoorVehicle::VehicleDoorType>(i);
+      DoorVehicle.bIsOpen = true;
+      AddDoorVehicle(DoorVehicle);
+    }
+  }
 }
 
 void ACarlaRecorder::AddExistingWeather(void)

@@ -18,16 +18,22 @@ RUN apt-get update && \
             git \
         && rm -rf /var/lib/apt/lists/*
 
-# Use system pip (PEP 668): don't upgrade Debian-managed pip to avoid uninstall errors
+# The pip of Ubuntu 24.04 (24.0) backtracks into source builds when it resolves the example
+# requirements. It is managed by apt and cannot be uninstalled by pip (PEP 668), so install
+# a current pip next to it; the one in /usr/local wins.
+RUN python3 -m pip install --break-system-packages --upgrade --ignore-installed pip
 
 # Move over PythonAPI
 COPY ./artifacts/PythonAPI ${CARLA_API_PATH}
 RUN rm -f ${CARLA_API_PATH}/carla/__init__.py
 
-# Recursively install PythonAPI requirements, keep version of first occurrence
-RUN cat $(find ${CARLA_API_PATH} -type f -name "requirements.txt") > /tmp/requirements_raw.txt \
-    && awk -F '==' '{print $1}' /tmp/requirements_raw.txt | awk '!visited[$1]++' > /tmp/requirements.txt \
-    && python3 -m pip install --break-system-packages -r /tmp/requirements.txt
+# Install the requirements of the PythonAPI itself, its examples, utilities and tests.
+# Not every requirements.txt below PythonAPI: since CARLA 1.0 the examples of the
+# AV stacks and the NVIDIA integrations bring their own, with pins that conflict.
+RUN python3 -m pip install --break-system-packages \
+        -r ${CARLA_API_PATH}/examples/requirements.txt \
+        -r ${CARLA_API_PATH}/util/requirements.txt \
+        -r ${CARLA_API_PATH}/test/requirements.txt
 
 # Install CARLA PythonAPI wheel
 RUN set -e; \

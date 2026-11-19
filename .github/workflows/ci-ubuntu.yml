@@ -22,14 +22,23 @@ permissions:
 
 
 env:
-  UBUNTU_DISTRO: "22.04"
+  UBUNTU_DISTRO: "24.04"
   CARLA_CI_UID: ""
   CARLA_CI_GID: ""
   DOCKER_IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
+  # Official CARLA content (commit, branch or tag of bitbucket.org/carla-simulator/carla-content).
+  # Pinned to a commit of ue58-dev-carla
+  CARLA_CONTENT_REF: "ae31c95b18b825c7cbc6e2d4d91e4a34e9f1e325"
+  # OpenADS content merged on top of the official content.
   CONTENT_OVERLAY: "true"
   CONTENT_OVERLAY_REPOSITORY: "https://gitlab.ika.rwth-aachen.de/fb-fi/simulation/carla/carla-content"
-  CONTENT_OVERLAY_BRANCH: "ue5"
-  UE5_BRANCH: "ue5-dev-carla"
+  CONTENT_OVERLAY_BRANCH: "ue58"
+  UE5_BRANCH: "ue58-dev-carla"
+  # Persistent Unreal Engine checkout on the runner. One directory per engine
+  # generation: the engine is only built when no editor binary is found there.
+  UE5_HOST_PATH: /work/carla/unreal-engine-5.8
+  # The NVIDIA DLSS SDK (ray-traced lens cameras, DLSS upscaling) is not used.
+  DLSS_SDK: disabled
 
 
 jobs:
@@ -57,6 +66,15 @@ jobs:
 
       - name: Clean runner workspace
         run: |
+          # Cancelling a run kills the docker CLI but not its container, which
+          # keeps building and writing into this workspace. Stop it first, or
+          # rm races with it ("Directory not empty" under .git/lfs/incomplete).
+          stale="$(docker ps -aq --filter "label=carla-ci.workspace=$GITHUB_WORKSPACE")"
+          if [ -n "$stale" ]; then
+            echo "Removing leftover CI containers:" $stale
+            docker rm -f $stale >/dev/null || true
+          fi
+
           case "$GITHUB_WORKSPACE" in
             "$RUNNER_WORKSPACE"/*) mkdir -p "$GITHUB_WORKSPACE"; find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + ;;
             *) echo "Refusing to clean unsafe GITHUB_WORKSPACE: $GITHUB_WORKSPACE"; exit 1 ;;
@@ -75,16 +93,18 @@ jobs:
           runner_uid="${{ steps.runner.outputs.runner-uid }}"
           runner_gid="${{ steps.runner.outputs.runner-gid }}"
 
-          if [ ! -d /work/carla/unreal-engine ]; then
-            echo "Missing host mount directory: /work/carla/unreal-engine"
+          mkdir -p "$UE5_HOST_PATH" 2>/dev/null || true
+
+          if [ ! -d "$UE5_HOST_PATH" ]; then
+            echo "Missing host mount directory: $UE5_HOST_PATH"
             echo "Run this once on the self-hosted runner:"
-            echo "  sudo install -d -o ${runner_uid} -g ${runner_gid} -m 775 /work/carla/unreal-engine"
+            echo "  sudo install -d -o ${runner_uid} -g ${runner_gid} -m 775 $UE5_HOST_PATH"
             exit 1
           fi
 
-          if [ ! -w /work/carla/unreal-engine ]; then
-            echo "Unreal Engine directory is not writable for CI user ${runner_uid}:${runner_gid}: /work/carla/unreal-engine"
-            echo "Make /work/carla/unreal-engine writable for the self-hosted runner user."
+          if [ ! -w "$UE5_HOST_PATH" ]; then
+            echo "Unreal Engine directory is not writable for CI user ${runner_uid}:${runner_gid}: $UE5_HOST_PATH"
+            echo "Make $UE5_HOST_PATH writable for the self-hosted runner user."
             exit 1
           fi
 
@@ -95,7 +115,7 @@ jobs:
     outputs:
       builder-image-id: ${{ steps.publish_builder_image.outputs.builder-image-id }}
     env:
-      CARLA_DOCKER_IMAGE: carla-development:ue5-22.04
+      CARLA_DOCKER_IMAGE: carla-development:ue5-24.04
       CARLA_DOCKER_UID: ${{ needs.prepare-runner.outputs.runner-uid }}
       CARLA_DOCKER_GID: ${{ needs.prepare-runner.outputs.runner-gid }}
       CARLA_DOCKER_GROUP_GID: "999"
@@ -137,7 +157,7 @@ jobs:
       - name: Publish builder image
         id: publish_builder_image
         run: |
-          builder_image="${DOCKER_IMAGE_REPOSITORY}:builder"
+          builder_image="${DOCKER_IMAGE_REPOSITORY}:builder-${UBUNTU_DISTRO}"
           docker tag "$CARLA_DOCKER_IMAGE" "$builder_image"
           docker push "$builder_image"
           echo "builder-image-id=$(docker image inspect --format '{{.Id}}' "$CARLA_DOCKER_IMAGE")" >> "$GITHUB_OUTPUT"
@@ -170,6 +190,7 @@ jobs:
           UE_GITHUB_TOKEN: ${{ secrets.UE_GITHUB_TOKEN }}
         run: |
           docker run --rm \
+            --label "carla-ci.workspace=$GITHUB_WORKSPACE" \
             --gpus all \
             --user "${{ needs.prepare-runner.outputs.runner-uid }}:${{ needs.prepare-runner.outputs.runner-gid }}" \
             -e NVIDIA_VISIBLE_DEVICES=all \
@@ -177,9 +198,10 @@ jobs:
             -e HOME=/home/carla \
             -e CARLA_UNREAL_ENGINE_PATH="$CARLA_UNREAL_ENGINE_PATH" \
             -e UE5_BRANCH="$UE5_BRANCH" \
+            -e DLSS_SDK="$DLSS_SDK" \
             -e UE_GITHUB_USERNAME="$UE_GITHUB_USERNAME" \
             -e UE_GITHUB_TOKEN="$UE_GITHUB_TOKEN" \
-            --volume /work/carla/unreal-engine:/workspaces/unreal-engine \
+            --volume "$UE5_HOST_PATH":/workspaces/unreal-engine \
             "${{ needs.build-builder-image.outputs.builder-image-id }}" \
             bash -leo pipefail -c '
           mkdir -p "$HOME"
@@ -262,18 +284,21 @@ jobs:
           mkdir -p "$ARTIFACTS_DIR"
 
           docker run --rm \
+            --label "carla-ci.workspace=$GITHUB_WORKSPACE" \
             --gpus all \
             --user "${{ needs.prepare-runner.outputs.runner-uid }}:${{ needs.prepare-runner.outputs.runner-gid }}" \
             -e NVIDIA_VISIBLE_DEVICES=all \
             -e NVIDIA_DRIVER_CAPABILITIES=all \
             -e HOME=/home/carla \
             -e CARLA_UNREAL_ENGINE_PATH="$CARLA_UNREAL_ENGINE_PATH" \
+            -e DLSS_SDK="$DLSS_SDK" \
+            -e CARLA_CONTENT_REF="$CARLA_CONTENT_REF" \
             -e CONTENT_OVERLAY="$CONTENT_OVERLAY" \
             -e GITLAB_CONTENT_USERNAME="$GITLAB_CONTENT_USERNAME" \
             -e GITLAB_CONTENT_TOKEN="$GITLAB_CONTENT_TOKEN" \
             -e CARLA_CONTENT_REPOSITORY="$CARLA_CONTENT_REPOSITORY" \
             -e CARLA_CONTENT_BRANCH="$CARLA_CONTENT_BRANCH" \
-            --volume /work/carla/unreal-engine:/workspaces/unreal-engine \
+            --volume "$UE5_HOST_PATH":/workspaces/unreal-engine \
             --volume "$GITHUB_WORKSPACE":/workspaces/carla \
             --volume "$ARTIFACTS_DIR":/carla/artifacts \
             --workdir /workspaces/carla \
@@ -281,7 +306,12 @@ jobs:
             bash -leo pipefail -c '
           git config --global --add safe.directory /workspaces/carla
 
-          git clone -b ue5-dev --depth 1 --config filter.lfs.required=false https://bitbucket.org/carla-simulator/carla-content.git Unreal/CarlaUnreal/Content/Carla
+          # init + fetch instead of clone -b, which does not accept a commit SHA.
+          git init -q Unreal/CarlaUnreal/Content/Carla
+          git -C Unreal/CarlaUnreal/Content/Carla config filter.lfs.required false
+          git -C Unreal/CarlaUnreal/Content/Carla remote add origin https://bitbucket.org/carla-simulator/carla-content.git
+          git -C Unreal/CarlaUnreal/Content/Carla fetch --depth 1 origin "$CARLA_CONTENT_REF"
+          git -C Unreal/CarlaUnreal/Content/Carla checkout -q FETCH_HEAD
 
           if [ "$CONTENT_OVERLAY" = "true" ]; then
             rm -rf Unreal/CarlaUnreal/content-openads
@@ -294,7 +324,7 @@ jobs:
               --overlay Unreal/CarlaUnreal/content-openads/Carla
           fi
 
-          cmake --preset Release -DENABLE_ROS2=ON -DBUILD_LIBCARLA_TESTS=ON
+          cmake --preset Release -DENABLE_ROS2=ON -DBUILD_LIBCARLA_TESTS=ON -DCARLA_DLSS_SDK_PATH=disabled
           cmake --build Build/Release --target carla-client
           cmake --build Build/Release --target carla-python-api
           cmake --build Build/Release --target carla-server
@@ -361,7 +391,7 @@ jobs:
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          ref_name="$(echo "$GITHUB_REF_NAME" | tr / -)"
+          ref_name="$(echo "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" | tr / -)"
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             echo "IMAGE_TAG_SUFFIX=_${ref_name}" >> "$GITHUB_ENV"
           elif [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
@@ -425,7 +455,7 @@ jobs:
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          ref_name="$(echo "$GITHUB_REF_NAME" | tr / -)"
+          ref_name="$(echo "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" | tr / -)"
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             echo "IMAGE_TAG_SUFFIX=_${ref_name}" >> "$GITHUB_ENV"
           elif [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
@@ -513,6 +543,13 @@ jobs:
     steps:
       - name: Clean runner workspace
         run: |
+          # See prepare-runner: stop containers a cancelled build left running.
+          stale="$(docker ps -aq --filter "label=carla-ci.workspace=$GITHUB_WORKSPACE")"
+          if [ -n "$stale" ]; then
+            echo "Removing leftover CI containers:" $stale
+            docker rm -f $stale >/dev/null || true
+          fi
+
           ci_dir="${{ needs.prepare-runner.outputs.ci-dir }}"
           if [ -n "$ci_dir" ]; then
             case "$ci_dir" in

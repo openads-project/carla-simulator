@@ -14,6 +14,8 @@
 
 #include "carla/trafficmanager/TrafficManager.h"
 
+#include <algorithm>
+
 namespace carla {
 
 using TM = traffic_manager::TrafficManager;
@@ -79,6 +81,17 @@ namespace client {
     GetEpisode().Lock()->CloseVehicleDoor(*this, rpc::VehicleDoor(door_idx));
   }
 
+  bool Vehicle::IsDoorOpen(const VehicleDoor door_idx) const {
+    const auto &data = GetEpisode().Lock()->GetActorSnapshot(*this).state.vehicle_data;
+    const unsigned count = std::min<unsigned>(data.door_count, 8u);
+    if (door_idx == VehicleDoor::All) {
+      const unsigned all = (1u << count) - 1u;
+      return (count > 0u) && ((data.open_doors & all) == all);
+    }
+    const unsigned index = static_cast<unsigned>(door_idx);
+    return (index < count) && ((data.open_doors & (1u << index)) != 0u);
+  }
+
   void Vehicle::SetLightState(const LightState &light_state) {
     GetEpisode().Lock()->SetLightStateToVehicle(*this, rpc::VehicleLightState(light_state));
   }
@@ -89,6 +102,26 @@ namespace client {
 
   float Vehicle::GetWheelSteerAngle(WheelLocation wheel_location) {
     return GetEpisode().Lock()->GetWheelSteerAngle(*this, wheel_location);
+  }
+
+  void Vehicle::SetWheelPitchAngle(WheelLocation wheel_location, float angle_in_deg) {
+    GetEpisode().Lock()->SetWheelPitchAngle(*this, wheel_location, angle_in_deg);
+  }
+
+  float Vehicle::GetWheelPitchAngle(WheelLocation wheel_location) {
+    return GetEpisode().Lock()->GetWheelPitchAngle(*this, wheel_location);
+  }
+
+  void Vehicle::SetWheelSuspensionOffset(WheelLocation wheel_location, float offset) {
+    GetEpisode().Lock()->SetWheelSuspensionOffset(*this, wheel_location, offset);
+  }
+
+  float Vehicle::GetWheelSuspensionOffset(WheelLocation wheel_location) {
+    return GetEpisode().Lock()->GetWheelSuspensionOffset(*this, wheel_location);
+  }
+
+  void Vehicle::SetWheelAnimationOverride(bool enabled) {
+    GetEpisode().Lock()->SetWheelAnimationOverride(*this, enabled);
   }
 
   Vehicle::Control Vehicle::GetControl() const {

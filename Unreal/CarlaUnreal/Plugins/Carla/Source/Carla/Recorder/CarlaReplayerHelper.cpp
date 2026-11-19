@@ -29,7 +29,6 @@
 #include <util/ue-header-guard-begin.h>
 #include "Components/BoxComponent.h"
 #include "Engine/StaticMeshActor.h"
-#include "VehicleAnimationInstance.h"
 #include <util/ue-header-guard-end.h>
 
 #include <util/disable-ue4-macros.h>
@@ -113,7 +112,7 @@ FCarlaActor *CarlaReplayerHelper::FindTrafficSignAt(FVector Location)
   // through all actors in registry
   for (auto It = Registry.begin(); It != Registry.end(); ++It)
   {
-    FCarlaActor* CarlaActor = It.Value().Get();
+    FCarlaActor* CarlaActor = It->Value.Get();
     if (CarlaActor->GetActorType() == FCarlaActor::ActorType::TrafficLight ||
         CarlaActor->GetActorType() == FCarlaActor::ActorType::TrafficSign)
     {
@@ -130,6 +129,35 @@ FCarlaActor *CarlaReplayerHelper::FindTrafficSignAt(FVector Location)
   }
   // actor not found
   return nullptr;
+}
+
+// query-only collision on a replayed actor, restored by ProcessReplayerFinish
+void CarlaReplayerHelper::MakeReplayedActorQueryOnly(AActor *Actor)
+{
+  if (Actor == nullptr)
+  {
+    return;
+  }
+  Actor->SetActorEnableCollision(true);
+  TArray<UPrimitiveComponent *> Primitives;
+  Actor->GetComponents<UPrimitiveComponent>(Primitives);
+  for (UPrimitiveComponent *Primitive : Primitives)
+  {
+    const ECollisionEnabled::Type Enabled = Primitive->BodyInstance.GetCollisionEnabled(false);
+    const bool bOverlaps = Primitive->GetGenerateOverlapEvents();
+    // Only the body (root) and what ray-cast sensors hit keep query collision; the rest would only cost queries on every move.
+    const bool bSensorVisible = Primitive == Actor->GetRootComponent() ||
+        Primitive->GetCollisionResponseToChannel(ECC_GameTraceChannel2 /*SensorTrace*/) == ECR_Block;
+    const ECollisionEnabled::Type Replayed =
+        Enabled == ECollisionEnabled::NoCollision || !bSensorVisible ? ECollisionEnabled::NoCollision : ECollisionEnabled::QueryOnly;
+    if (Replayed == Enabled && !bOverlaps)
+    {
+      continue;
+    }
+    ReplayedPrimitives.Add({Primitive, static_cast<uint8>(Enabled), bOverlaps});
+    Primitive->SetGenerateOverlapEvents(false);
+    Primitive->SetCollisionEnabled(Replayed);
+  }
 }
 
 // enable / disable physics for an actor
@@ -218,8 +246,8 @@ std::pair<int, uint32_t> CarlaReplayerHelper::ProcessReplayerEventAdd(
       {
         // disable physics
         SetActorSimulatePhysics(result.second, false);
-        // disable collisions
-        result.second->GetActor()->SetActorEnableCollision(false);
+        // query-only collision, so sensors still see the replayed actor
+        MakeReplayedActorQueryOnly(result.second->GetActor());
         // disable autopilot for vehicles
         if (result.second->GetActorType() == FCarlaActor::ActorType::Vehicle)
           SetActorAutopilot(result.second, false, false);
@@ -317,29 +345,54 @@ bool CarlaReplayerHelper::ProcessReplayerPosition(CarlaRecorderPosition Pos1, Ca
   return false;
 }
 
-void CarlaReplayerHelper::ProcessReplayerAnimVehicleWheels(CarlaRecorderAnimWheels VehicleAnimWheels)
+// The spin from one frame to the next. A wheel can turn more than half a turn
+// between frames, so the whole turns come from the distance travelled.
+static float GetWheelSpinDelta(float Spin1, float Spin2, float Travel, float Radius)
+{
+  const float Delta = FMath::UnwindDegrees(Spin2 - Spin1);
+  if (Radius <= UE_KINDA_SMALL_NUMBER)
+  {
+    return Delta;
+  }
+  const float Expected = -FMath::RadiansToDegrees(Travel / Radius);
+  return Delta + 360.0f * FMath::RoundToFloat((Expected - Delta) / 360.0f);
+}
+
+void CarlaReplayerHelper::ProcessReplayerAnimVehicleWheels(
+    const CarlaRecorderAnimWheels &Wheels1,
+    const CarlaRecorderAnimWheels &Wheels2,
+    double Per,
+    float Travel)
 {
   check(Episode != nullptr)
-  FCarlaActor *CarlaActor = Episode->FindCarlaActor(VehicleAnimWheels.DatabaseId);
+  FCarlaActor *CarlaActor = Episode->FindCarlaActor(Wheels2.DatabaseId);
   if (CarlaActor == nullptr)
     return;
   if (CarlaActor->GetActorType() != FCarlaActor::ActorType::Vehicle)
     return;
   ACarlaWheeledVehicle* CarlaVehicle = Cast<ACarlaWheeledVehicle>(CarlaActor->GetActor());
   check(CarlaVehicle != nullptr)
-  USkeletalMeshComponent* SkeletalMesh = CarlaVehicle->GetMesh();
-  check(SkeletalMesh != nullptr)
-  UVehicleAnimationInstance* VehicleAnim = Cast<UVehicleAnimationInstance>(SkeletalMesh->GetAnimInstance());
-  check(VehicleAnim != nullptr)
+  // Without it the wheels cannot be posed, and roll on their own instead.
+  if (!CarlaVehicle->HasCarlaVehicleAnimation())
+    return;
 
-#if 0 // @CARLAUE5
-  for (uint32_t i = 0; i < VehicleAnimWheels.WheelValues.size(); ++i)
+  // Released in ProcessReplayerFinish.
+  CarlaVehicle->SetWheelAnimationOverride(true);
+  const float Alpha = static_cast<float>(Per);
+  const bool bSameWheels = Wheels1.WheelValues.size() == Wheels2.WheelValues.size();
+  for (size_t i = 0; i < Wheels2.WheelValues.size(); ++i)
   {
-    const WheelInfo& Element = VehicleAnimWheels.WheelValues[i];
-    VehicleAnim->SetWheelRotYaw(static_cast<uint8>(Element.Location), Element.SteeringAngle);
-    VehicleAnim->SetWheelPitchAngle(static_cast<uint8>(Element.Location), Element.TireRotation);
+    const WheelInfo& Element2 = Wheels2.WheelValues[i];
+    const WheelInfo& Element1 = bSameWheels ? Wheels1.WheelValues[i] : Element2;
+    const int32 WheelIndex = static_cast<int32>(Element2.Location);
+    if (!CarlaVehicle->HasWheel(WheelIndex))
+      continue;
+    const float Spin = Element1.TireRotation + Alpha * GetWheelSpinDelta(
+        Element1.TireRotation, Element2.TireRotation, Travel, CarlaVehicle->GetWheelRadius(WheelIndex));
+    CarlaVehicle->SetWheelSteerDirection(Element2.Location,
+        FMath::Lerp(Element1.SteeringAngle, Element2.SteeringAngle, Alpha));
+    CarlaVehicle->SetWheelPitchAngle(Element2.Location, FMath::UnwindDegrees(Spin));
   }
-#endif
 }
 
 // reposition the camera
@@ -484,6 +537,10 @@ void CarlaReplayerHelper::ProcessReplayerLightScene(CarlaRecorderLightScene Ligh
       CarlaLight->SetLightColor(LightScene.Color);
       CarlaLight->SetLightOn(LightScene.bOn);
       CarlaLight->SetLightType(static_cast<ELightType>(LightScene.Type));
+      // The replayer mutates light state server-side, outside any client
+      // request; without dirty-marking, connected clients keep serving stale
+      // is_on/intensity values from their LightManager cache.
+      CarlaLightSubsystem->SetClientStatesdirty("");
     }
   }
 }
@@ -537,6 +594,17 @@ void CarlaReplayerHelper::ProcessReplayerWalkerBones(const CarlaRecorderWalkerBo
 // replay finish
 bool CarlaReplayerHelper::ProcessReplayerFinish(bool bApplyAutopilot, bool bIgnoreHero, std::unordered_map<uint32_t, bool> &IsHero)
 {
+  // restore the collision MakeReplayedActorQueryOnly() reduced
+  for (const FReplayedPrimitive &Replayed : ReplayedPrimitives)
+  {
+    if (Replayed.Primitive.IsValid())
+    {
+      Replayed.Primitive->SetCollisionEnabled(static_cast<ECollisionEnabled::Type>(Replayed.CollisionEnabled));
+      Replayed.Primitive->SetGenerateOverlapEvents(Replayed.bGenerateOverlapEvents);
+    }
+  }
+  ReplayedPrimitives.Reset();
+
   // set autopilot and physics to all AI vehicles
   const FActorRegistry& Registry = Episode->GetActorRegistry();
   for (auto& It : Registry)
@@ -554,6 +622,10 @@ bool CarlaReplayerHelper::ProcessReplayerFinish(bool bApplyAutopilot, bool bIgno
         {
             // stop all vehicles
             SetActorSimulatePhysics(CarlaActor, true);
+            if (auto* CarlaVehicle = Cast<ACarlaWheeledVehicle>(CarlaActor->GetActor()))
+            {
+              CarlaVehicle->SetWheelAnimationOverride(false);
+            }
             SetActorVelocity(CarlaActor, FVector(0, 0, 0));
             FVehicleControl Control;
             Control.Throttle = 0.0f;
@@ -569,8 +641,9 @@ bool CarlaReplayerHelper::ProcessReplayerFinish(bool bApplyAutopilot, bool bIgno
 
       // walkers
       case FCarlaActor::ActorType::Walker:
-        // stop walker
+        // stop walker and give it its movement back
         SetWalkerSpeed(CarlaActor->GetActorId(), 0.0f);
+        SetActorSimulatePhysics(CarlaActor, true);
         break;
     }
   }

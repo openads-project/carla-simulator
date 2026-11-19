@@ -1,7 +1,7 @@
 apiVersion: v2
 name: carla-server
-version: 0.10.0-1.1.1
-appVersion: 0.10.0-1.1.1
+version: 1.0.0-1.0.0
+appVersion: 1.0.0-1.0.0
 description: CARLA simulation backend for OpenADS based on Unreal Engine 5
 dependencies:
   - repository: oci://ghcr.io/openads-project/openads-helm
