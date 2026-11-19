@@ -1,8 +1,7 @@
 services:
 
   carla-client:
-    # TODO(openads): replace the feature-branch CI image with the release tag (v1.0.0-x.y.z) when releasing.
-    image: ghcr.io/openads-project/carla-simulator:client_feature-carla-1.0_ci
+    image: ghcr.io/openads-project/carla-simulator:client_v1.0.0-1.0.0
     environment:
       CARLA_HOST: carla-server
       CARLA_PORT: 2000
