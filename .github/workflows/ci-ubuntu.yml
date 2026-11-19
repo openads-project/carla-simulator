@@ -26,8 +26,9 @@ env:
   CARLA_CI_UID: ""
   CARLA_CI_GID: ""
   DOCKER_IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
-  # Official CARLA content (branch or tag of bitbucket.org/carla-simulator/carla-content).
-  CARLA_CONTENT_REF: "1.0"
+  # Official CARLA content (commit, branch or tag of bitbucket.org/carla-simulator/carla-content).
+  # Pinned to a commit of ue58-dev-carla
+  CARLA_CONTENT_REF: "ae31c95b18b825c7cbc6e2d4d91e4a34e9f1e325"
   # OpenADS content merged on top of the official content.
   CONTENT_OVERLAY: "true"
   CONTENT_OVERLAY_REPOSITORY: "https://gitlab.ika.rwth-aachen.de/fb-fi/simulation/carla/carla-content"
@@ -65,6 +66,15 @@ jobs:
 
       - name: Clean runner workspace
         run: |
+          # Cancelling a run kills the docker CLI but not its container, which
+          # keeps building and writing into this workspace. Stop it first, or
+          # rm races with it ("Directory not empty" under .git/lfs/incomplete).
+          stale="$(docker ps -aq --filter "label=carla-ci.workspace=$GITHUB_WORKSPACE")"
+          if [ -n "$stale" ]; then
+            echo "Removing leftover CI containers:" $stale
+            docker rm -f $stale >/dev/null || true
+          fi
+
           case "$GITHUB_WORKSPACE" in
             "$RUNNER_WORKSPACE"/*) mkdir -p "$GITHUB_WORKSPACE"; find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} + ;;
             *) echo "Refusing to clean unsafe GITHUB_WORKSPACE: $GITHUB_WORKSPACE"; exit 1 ;;
@@ -180,6 +190,7 @@ jobs:
           UE_GITHUB_TOKEN: ${{ secrets.UE_GITHUB_TOKEN }}
         run: |
           docker run --rm \
+            --label "carla-ci.workspace=$GITHUB_WORKSPACE" \
             --gpus all \
             --user "${{ needs.prepare-runner.outputs.runner-uid }}:${{ needs.prepare-runner.outputs.runner-gid }}" \
             -e NVIDIA_VISIBLE_DEVICES=all \
@@ -273,6 +284,7 @@ jobs:
           mkdir -p "$ARTIFACTS_DIR"
 
           docker run --rm \
+            --label "carla-ci.workspace=$GITHUB_WORKSPACE" \
             --gpus all \
             --user "${{ needs.prepare-runner.outputs.runner-uid }}:${{ needs.prepare-runner.outputs.runner-gid }}" \
             -e NVIDIA_VISIBLE_DEVICES=all \
@@ -294,7 +306,12 @@ jobs:
             bash -leo pipefail -c '
           git config --global --add safe.directory /workspaces/carla
 
-          git clone -b "$CARLA_CONTENT_REF" --depth 1 --config filter.lfs.required=false https://bitbucket.org/carla-simulator/carla-content.git Unreal/CarlaUnreal/Content/Carla
+          # init + fetch instead of clone -b, which does not accept a commit SHA.
+          git init -q Unreal/CarlaUnreal/Content/Carla
+          git -C Unreal/CarlaUnreal/Content/Carla config filter.lfs.required false
+          git -C Unreal/CarlaUnreal/Content/Carla remote add origin https://bitbucket.org/carla-simulator/carla-content.git
+          git -C Unreal/CarlaUnreal/Content/Carla fetch --depth 1 origin "$CARLA_CONTENT_REF"
+          git -C Unreal/CarlaUnreal/Content/Carla checkout -q FETCH_HEAD
 
           if [ "$CONTENT_OVERLAY" = "true" ]; then
             rm -rf Unreal/CarlaUnreal/content-openads
@@ -526,6 +543,13 @@ jobs:
     steps:
       - name: Clean runner workspace
         run: |
+          # See prepare-runner: stop containers a cancelled build left running.
+          stale="$(docker ps -aq --filter "label=carla-ci.workspace=$GITHUB_WORKSPACE")"
+          if [ -n "$stale" ]; then
+            echo "Removing leftover CI containers:" $stale
+            docker rm -f $stale >/dev/null || true
+          fi
+
           ci_dir="${{ needs.prepare-runner.outputs.ci-dir }}"
           if [ -n "$ci_dir" ]; then
             case "$ci_dir" in

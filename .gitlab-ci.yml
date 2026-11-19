@@ -16,8 +16,9 @@ variables:
   # OpenADS content (fb-fi/simulation/carla/carla-content) merged on top of the
   # official content.
   CARLA_CONTENT_BRANCH: "ue58"
-  # Official CARLA content (branch or tag of bitbucket.org/carla-simulator/carla-content).
-  CARLA_CONTENT_BASE_REF: "1.0"
+  # Official CARLA content (commit, branch or tag of bitbucket.org/carla-simulator/carla-content).
+  # Pinned to a commit of ue58-dev-carla
+  CARLA_CONTENT_BASE_REF: "ae31c95b18b825c7cbc6e2d4d91e4a34e9f1e325"
   # The NVIDIA DLSS SDK (ray-traced lens cameras, DLSS upscaling) is not used.
   DLSS_SDK: "disabled"
   # carla_version names the images, carla_package_version the package files:
@@ -185,7 +186,11 @@ build-carla:
 
       mkdir -p Unreal/CarlaUnreal/Content
       rm -rf Unreal/CarlaUnreal/content-openads
-      git clone -b "${CARLA_CONTENT_BASE_REF}" --depth 1 https://bitbucket.org/carla-simulator/carla-content.git Unreal/CarlaUnreal/Content/Carla
+      # init + fetch instead of clone -b, which does not accept a commit SHA.
+      git init -q Unreal/CarlaUnreal/Content/Carla
+      git -C Unreal/CarlaUnreal/Content/Carla remote add origin https://bitbucket.org/carla-simulator/carla-content.git
+      git -C Unreal/CarlaUnreal/Content/Carla fetch --depth 1 origin "${CARLA_CONTENT_BASE_REF}"
+      git -C Unreal/CarlaUnreal/Content/Carla checkout -q FETCH_HEAD
 
       git clone \
         --single-branch --depth 1 -b "${CARLA_CONTENT_BRANCH}" \
