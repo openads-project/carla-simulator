@@ -120,6 +120,7 @@ jobs:
       CARLA_DOCKER_GID: ${{ needs.prepare-runner.outputs.runner-gid }}
       CARLA_DOCKER_GROUP_GID: "999"
       DOCKER_CONFIG: ${{ needs.prepare-runner.outputs.ci-dir }}/docker-config
+      IMAGE_TAG: latest
 
     steps:
       - name: Checkout repository
@@ -154,10 +155,21 @@ jobs:
           }
           EOF
 
+      - name: Set image tag
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          ref_name="$(echo "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" | tr / -)"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "IMAGE_TAG=${ref_name}" >> "$GITHUB_ENV"
+          elif [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "IMAGE_TAG=latest_${ref_name}_ci" >> "$GITHUB_ENV"
+          fi
+
       - name: Publish builder image
         id: publish_builder_image
         run: |
-          builder_image="${DOCKER_IMAGE_REPOSITORY}:builder-${UBUNTU_DISTRO}"
+          builder_image="${DOCKER_IMAGE_REPOSITORY}/builder:${IMAGE_TAG}"
           docker tag "$CARLA_DOCKER_IMAGE" "$builder_image"
           docker push "$builder_image"
           echo "builder-image-id=$(docker image inspect --format '{{.Id}}' "$CARLA_DOCKER_IMAGE")" >> "$GITHUB_OUTPUT"
@@ -384,7 +396,7 @@ jobs:
       - prepare-runner
       - provide-artifacts
     env:
-      IMAGE_TAG_SUFFIX: ""
+      IMAGE_TAG: latest
       DOCKER_CONFIG: ${{ needs.prepare-runner.outputs.ci-dir }}/docker-config
     steps:
       - name: Set image tag
@@ -393,9 +405,9 @@ jobs:
         run: |
           ref_name="$(echo "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" | tr / -)"
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            echo "IMAGE_TAG_SUFFIX=_${ref_name}" >> "$GITHUB_ENV"
+            echo "IMAGE_TAG=${ref_name}" >> "$GITHUB_ENV"
           elif [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
-            echo "IMAGE_TAG_SUFFIX=_${ref_name}_ci" >> "$GITHUB_ENV"
+            echo "IMAGE_TAG=latest_${ref_name}_ci" >> "$GITHUB_ENV"
           fi
 
       - name: Configure Docker auth for GHCR
@@ -427,7 +439,7 @@ jobs:
         with:
           context: .
           file: Util/Docker/client/Client.Dockerfile
-          tags: ${{ env.DOCKER_IMAGE_REPOSITORY }}:client${{ env.IMAGE_TAG_SUFFIX }}
+          tags: ${{ env.DOCKER_IMAGE_REPOSITORY }}/client:${{ env.IMAGE_TAG }}
           push: true
           build-args: |
             UBUNTU_DISTRO=${{ env.UBUNTU_DISTRO }}
@@ -444,11 +456,11 @@ jobs:
       - prepare-runner
       - create-client-image
     env:
-      IMAGE_TAG_SUFFIX: ""
+      IMAGE_TAG: latest
       DOCKER_CONFIG: ${{ needs.prepare-runner.outputs.ci-dir }}/docker-config
       ARTIFACTS_DIR: ${{ needs.prepare-runner.outputs.artifacts-dir }}
       ARCHIVE_PATTERN: "Carla-*-Linux-Shipping.tar.gz"
-      SERVER_IMAGE_TAG: server
+      SERVER_IMAGE: server
       PACKAGE_DESCRIPTION: full
     steps: &server-image-steps
       - name: Set image tag
@@ -457,9 +469,9 @@ jobs:
         run: |
           ref_name="$(echo "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" | tr / -)"
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            echo "IMAGE_TAG_SUFFIX=_${ref_name}" >> "$GITHUB_ENV"
+            echo "IMAGE_TAG=${ref_name}" >> "$GITHUB_ENV"
           elif [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
-            echo "IMAGE_TAG_SUFFIX=_${ref_name}_ci" >> "$GITHUB_ENV"
+            echo "IMAGE_TAG=latest_${ref_name}_ci" >> "$GITHUB_ENV"
           fi
 
       - name: Configure Docker auth for GHCR
@@ -507,7 +519,7 @@ jobs:
         with:
           context: ${{ steps.server_package.outputs.context }}
           file: ${{ steps.server_package.outputs.dockerfile }}
-          tags: ${{ env.DOCKER_IMAGE_REPOSITORY }}:${{ env.SERVER_IMAGE_TAG }}${{ env.IMAGE_TAG_SUFFIX }}
+          tags: ${{ env.DOCKER_IMAGE_REPOSITORY }}/${{ env.SERVER_IMAGE }}:${{ env.IMAGE_TAG }}
           no-cache: true
           push: true
           build-args: |
@@ -525,11 +537,11 @@ jobs:
       - prepare-runner
       - create-server-image
     env:
-      IMAGE_TAG_SUFFIX: ""
+      IMAGE_TAG: latest
       DOCKER_CONFIG: ${{ needs.prepare-runner.outputs.ci-dir }}/docker-config
       ARTIFACTS_DIR: ${{ needs.prepare-runner.outputs.artifacts-dir }}
       ARCHIVE_PATTERN: "Carla-*-Linux-Shipping-Slim.tar.gz"
-      SERVER_IMAGE_TAG: server-slim
+      SERVER_IMAGE: server-slim
       PACKAGE_DESCRIPTION: slim
     steps: *server-image-steps
 
