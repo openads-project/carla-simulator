@@ -149,6 +149,7 @@ public:
       uint64_t sensor_type,
       carla::streaming::detail::stream_id_type stream_id,
       const carla::geom::Transform sensor_transform,
+      double timestamp,
       int W, int H, float Fov,
       const carla::SharedBufferView buffer,
       void *actor = nullptr);
@@ -270,6 +271,7 @@ private:
 
   // Takes _mutex.
   Stamp GetStamp() const;
+  static Stamp ToStamp(double timestamp);
 
   // The helpers below up to ResolveAutoStreamSuffix expect _mutex to be held
   // by the caller, except the GetOrCreate* factories and PublishTransform,
