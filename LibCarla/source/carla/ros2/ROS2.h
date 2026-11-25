@@ -303,9 +303,11 @@ private:
   std::shared_ptr<CarlaTransformPublisher> GetOrCreateTransformPublisherLocked(void *actor);
 
   // Broadcasts the sensor transform on /tf. Resolves the publisher and frame
-  // names under the lock, then writes outside it.
+  // names under the lock, then writes outside it. Cameras pass optical_frame:
+  // their frame is the one their images and camera_info are stamped with.
   void PublishTransform(
-      void *actor, const Stamp &stamp, const carla::geom::Transform &sensor_transform);
+      void *actor, const Stamp &stamp, const carla::geom::Transform &sensor_transform,
+      bool optical_frame = false);
 
   // Camera-side counterpart of GetOrCreateSensor for publishers that inherit
   // CarlaCameraPublisher (the RGB / Depth / SS / IS / Normals / OpticalFlow

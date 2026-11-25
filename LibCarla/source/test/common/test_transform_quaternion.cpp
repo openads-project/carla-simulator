@@ -33,6 +33,17 @@ void ExpectNearArray4(
   EXPECT_NEAR(actual[3], expected[3], eps);
 }
 
+// Where the frame's x (0), y (1) or z (2) axis points in the parent frame:
+// that column of the rotation matrix of q = (w, x, y, z).
+std::array<float, 3> Axis(const std::array<float, 4> &q, int i) {
+  const float w = q[0], x = q[1], y = q[2], z = q[3];
+  switch (i) {
+    case 0: return {1 - 2 * (y * y + z * z), 2 * (x * y + z * w), 2 * (x * z - y * w)};
+    case 1: return {2 * (x * y - z * w), 1 - 2 * (x * x + z * z), 2 * (y * z + x * w)};
+    default: return {2 * (x * z + y * w), 2 * (y * z - x * w), 1 - 2 * (x * x + y * y)};
+  }
+}
+
 }  // namespace
 
 TEST(TransformQuaternion, identity_rotation_is_w_one) {
@@ -105,4 +116,26 @@ TEST(TransformQuaternion, regression_guard_against_halved_deg_to_rad) {
       180.0f, 0.0f, 0.0f);
   EXPECT_NEAR(tf.rotation[0], 0.0f, 1e-3f);
   EXPECT_GT(std::abs(tf.rotation[2]), 0.9f);
+}
+
+TEST(TransformQuaternion, optical_frame_axes_point_right_down_forward) {
+  // REP 103 optical frame of an unrotated camera: x right, y down, z forward,
+  // i.e. -y, -z and +x of the x-forward, y-left, z-up sensor frame.
+  const auto q = carla::ros2::OpticalFrameRotation({1.0f, 0.0f, 0.0f, 0.0f});
+  ExpectNearArray4(q, {0.5f, -0.5f, 0.5f, -0.5f});
+  ExpectNearArray3(Axis(q, 0), {0.0f, -1.0f, 0.0f});
+  ExpectNearArray3(Axis(q, 1), {0.0f, 0.0f, -1.0f});
+  ExpectNearArray3(Axis(q, 2), {1.0f, 0.0f, 0.0f});
+}
+
+TEST(TransformQuaternion, optical_frame_of_camera_pitched_down_looks_down) {
+  // A camera pitched 20 deg down in CARLA looks forward and 20 deg below the
+  // horizon, with the image x axis still pointing right.
+  const auto tf = carla::ros2::TransformFromCarlaRotation(
+      0.0f, 0.0f, 0.0f,
+      -20.0f, 0.0f, 0.0f);
+  const auto q = carla::ros2::OpticalFrameRotation(tf.rotation);
+  const float pitch = 20.0f * static_cast<float>(M_PI) / 180.0f;
+  ExpectNearArray3(Axis(q, 2), {std::cos(pitch), 0.0f, -std::sin(pitch)});
+  ExpectNearArray3(Axis(q, 0), {0.0f, -1.0f, 0.0f});
 }

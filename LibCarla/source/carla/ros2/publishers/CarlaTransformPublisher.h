@@ -44,14 +44,16 @@ public:
 
   // Builds a TransformStamped(parent_frame_id -> child_frame_id) from the
   // given CARLA-handed translation + Euler-degree rotation and stages it
-  // for the next Publish().
+  // for the next Publish(). With optical_frame the child frame is a camera
+  // optical frame (z forward, x right, y down), see OpticalFrameRotation.
   bool Write(
       std::int32_t seconds,
       std::uint32_t nanoseconds,
       const std::string &parent_frame_id,
       const std::string &child_frame_id,
       float tx, float ty, float tz,
-      float pitch_deg, float yaw_deg, float roll_deg);
+      float pitch_deg, float yaw_deg, float roll_deg,
+      bool optical_frame = false);
 
   // Cache the last (input, output) pair per child_frame_id so a static
   // sensor doesn't pay the quaternion conversion on every tick. Public so

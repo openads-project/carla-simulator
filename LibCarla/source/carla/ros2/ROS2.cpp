@@ -573,7 +573,8 @@ std::string ParentFrameOrCarlaMap(const std::string &parent_chain) {
 }  // namespace
 
 void ROS2::PublishTransform(
-    void *actor, const Stamp &stamp, const carla::geom::Transform &sensor_transform) {
+    void *actor, const Stamp &stamp, const carla::geom::Transform &sensor_transform,
+    bool optical_frame) {
   std::shared_ptr<CarlaTransformPublisher> transform_publisher;
   std::string parent_frame;
   std::string frame_id;
@@ -589,7 +590,8 @@ void ROS2::PublishTransform(
   transform_publisher->Write(
       stamp.seconds, stamp.nanoseconds, parent_frame, frame_id,
       sensor_transform.location.x, sensor_transform.location.y, sensor_transform.location.z,
-      sensor_transform.rotation.pitch, sensor_transform.rotation.yaw, sensor_transform.rotation.roll);
+      sensor_transform.rotation.pitch, sensor_transform.rotation.yaw, sensor_transform.rotation.roll,
+      optical_frame);
   transform_publisher->Publish();
 }
 
@@ -667,7 +669,7 @@ void ROS2::ProcessDataFromCamera(
     publisher->Publish();
   }
 
-  PublishTransform(actor, stamp, sensor_transform);
+  PublishTransform(actor, stamp, sensor_transform, true);
 }
 
 void ROS2::ProcessDataFromGNSS(
@@ -807,7 +809,7 @@ void ROS2::ProcessDataFromDVS(
         stamp.seconds, stamp.nanoseconds, 1, static_cast<std::uint32_t>(event_count), event_bytes);
     publisher->Publish();
   }
-  PublishTransform(actor, stamp, sensor_transform);
+  PublishTransform(actor, stamp, sensor_transform, true);
 }
 
 void ROS2::ProcessDataFromLidar(
