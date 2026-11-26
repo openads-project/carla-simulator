@@ -171,6 +171,8 @@ The transform tree is rooted in `carla_map`, the origin of the CARLA world. The 
 
 The repeat on `/tf_static` is there for late joiners: the Zenoh middleware announces the latched QoS but does not replay the last sample, so a subscriber that starts after the sensor was spawned would otherwise never see its transform. A sensor that ticks less than once per second repeats at its own rate.
 
+A sensor frame has x forward, y left and z up, except for cameras (RGB, depth, semantic and instance segmentation, normals, optical flow and DVS): their frame is the optical frame their `image` and `camera_info` are stamped with, z forward, x right and y down, as [REP 103](https://www.ros.org/reps/rep-0103.html#suffix-frames) expects.
+
 A vehicle has no transform of its own: attach a `sensor.other.tf` to it to connect it, and with it every sensor on it, to `carla_map`. A [`sensor.other.odometry`](ros2_native_sensors.md#published-sensors) publishes the same pose together with the velocity as `nav_msgs/Odometry`. Both take two attributes that flatten the pose for stacks that work in the plane: `ignore_altitude` sets z to zero, `ignore_tilt` sets roll and pitch to zero. `sensor.other.imu` takes `ignore_tilt` as well.
 
 Set the `no_transform` attribute on any blueprint to opt that actor out, leaving its frame to be published somewhere else:

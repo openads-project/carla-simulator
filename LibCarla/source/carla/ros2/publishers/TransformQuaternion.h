@@ -66,5 +66,24 @@ struct TransformQuaternion {
   };
 }
 
+// Turns a (w, x, y, z) rotation from TransformFromCarlaRotation, whose frame
+// has x forward, y left and z up, into the rotation of the camera optical
+// frame that ROS expects in the header of images and camera_info (REP 103:
+// z forward, x right, y down). Right-multiplies by the fixed body-to-optical
+// rotation (0.5, -0.5, 0.5, -0.5), as carla_ros_bridge does for its cameras.
+[[nodiscard]] inline std::array<float, 4> OpticalFrameRotation(
+    const std::array<float, 4> &q) noexcept {
+  const float w = q[0];
+  const float x = q[1];
+  const float y = q[2];
+  const float z = q[3];
+  return {
+      0.5f * ( w + x - y + z),
+      0.5f * (-w + x - y - z),
+      0.5f * ( w + x + y - z),
+      0.5f * (-w + x + y + z),
+  };
+}
+
 }  // namespace ros2
 }  // namespace carla

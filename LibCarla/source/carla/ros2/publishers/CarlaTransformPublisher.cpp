@@ -82,7 +82,8 @@ bool CarlaTransformPublisher::Write(
     const std::string &parent_frame_id,
     const std::string &child_frame_id,
     float tx, float ty, float tz,
-    float pitch_deg, float yaw_deg, float roll_deg) {
+    float pitch_deg, float yaw_deg, float roll_deg,
+    bool optical_frame) {
   std::array<float, 3> translation;
   std::array<float, 4> rotation;
   bool changed = false;
@@ -99,7 +100,7 @@ bool CarlaTransformPublisher::Write(
     const auto computed =
         TransformFromCarlaRotation(tx, ty, tz, pitch_deg, yaw_deg, roll_deg);
     translation = computed.translation;
-    rotation = computed.rotation;
+    rotation = optical_frame ? OpticalFrameRotation(computed.rotation) : computed.rotation;
     _last_transforms.insert_or_assign(
         child_frame_id,
         CachedTransform{
