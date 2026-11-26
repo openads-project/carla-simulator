@@ -7,6 +7,8 @@
 #include "Commandlet/CarlaLargeMapConvertCommandlet.h"
 
 #include "Carla/MapGen/LargeMapManager.h"
+#include "Carla/Traffic/TrafficLightBase.h"
+#include "Carla/Traffic/TrafficSignBase.h"
 
 #include <util/ue-header-guard-begin.h>
 #include "Engine/DirectionalLight.h"
@@ -33,6 +35,8 @@ DEFINE_LOG_CATEGORY_STATIC(LogCarlaLargeMapConvert, Log, All);
 int32 UCarlaLargeMapConvertCommandlet::Main(const FString& Params)
 {
   const int32 Result = Super::Main(Params);
+  UE_LOG(LogCarlaLargeMapConvert, Display, TEXT(
+      "Kept %d traffic signs always loaded."), NumAlwaysLoadedSigns);
 
   TArray<FString> Tokens;
   TArray<FString> Switches;
@@ -149,6 +153,23 @@ void UCarlaLargeMapConvertCommandlet::PerformAdditionalWorldCleanup(UWorld* Worl
   UE_LOG(LogCarlaLargeMapConvert, Display, TEXT(
       "Discarded %d tile level-script objects and redirectors."),
       ToDiscard.Num());
+}
+
+void UCarlaLargeMapConvertCommandlet::PerformAdditionalActorChanges(AActor* Actor) const
+{
+  Super::PerformAdditionalActorChanges(Actor);
+
+  // Converted actors are spatially loaded, but UCarlaEpisode registers the
+  // traffic signs once, at BeginPlay, and a sign that streams in with its cell
+  // afterwards is never registered: clients such as the Leaderboard's
+  // RunningStopTest list the signs once and never see it. Keep them always
+  // loaded, so that all of them exist from BeginPlay on.
+  if (Actor->IsA<ATrafficSignBase>() && !Actor->IsA<ATrafficLightBase>() &&
+      Actor->GetIsSpatiallyLoaded() && Actor->CanChangeIsSpatiallyLoadedFlag())
+  {
+    Actor->SetIsSpatiallyLoaded(false);
+    ++NumAlwaysLoadedSigns;
+  }
 }
 
 void UCarlaLargeMapConvertCommandlet::OnWorldLoaded(UWorld* World)

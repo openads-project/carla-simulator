@@ -11,6 +11,8 @@
 #include "Carla/Game/CarlaStatics.h"
 #include "Carla/Game/CarlaStaticDelegates.h"
 #include "Carla/Lights/CarlaLight.h"
+#include "Carla/Traffic/TrafficLightBase.h"
+#include "Carla/Traffic/TrafficSignBase.h"
 #include "Carla/Vehicle/VehicleSpawnPoint.h"
 #include "Carla/Util/BoundingBoxCalculator.h"
 #include "Carla/Weather/Sky.h"
@@ -589,6 +591,26 @@ void ACarlaGameModeBase::OnLevelAddedToWorld(ULevel* InLevel, UWorld* InWorld)
     UE_LOG(LogCarla, Log, TEXT("Destroying streamed-in duplicate TrafficLightManager %s"),
         *Actor->GetName());
     Actor->Destroy();
+  }
+
+  // Traffic signs are registered once, at BeginPlay. A sign that streams in with its cell is never registered, 
+  // so clients do not see it and no stop sign is checked there. CarlaLargeMapConvert keeps signs always loaded.
+  if (!bWarnedStreamedTrafficSigns && Episode != nullptr)
+  {
+    for (AActor* Actor : InLevel->Actors)
+    {
+      if (IsValid(Actor) && Actor->IsA<ATrafficSignBase>() &&
+          !Actor->IsA<ATrafficLightBase>() && Episode->FindCarlaActor(Actor) == nullptr)
+      {
+        UE_LOG(LogCarla, Warning, TEXT(
+            "Traffic sign %s streamed in with a World Partition cell and is not registered: "
+            "clients cannot see the signs of this map's cells (for example no stop sign is "
+            "checked). Convert the map again with CarlaLargeMapConvert, which keeps traffic "
+            "signs always loaded."), *Actor->GetName());
+        bWarnedStreamedTrafficSigns = true;
+        break;
+      }
+    }
   }
 }
 

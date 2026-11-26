@@ -43,7 +43,17 @@ public:
   /// discards orphaned redirectors that point outside the main package.
   virtual void PerformAdditionalWorldCleanup(UWorld* World) const override;
 
+  /// Keeps the traffic signs always loaded. The runtime registers sign actors once, 
+  /// at BeginPlay, so a sign that streams in with its cell later is never registered
+  /// and no client sees it.
+  virtual void PerformAdditionalActorChanges(AActor* Actor) const override;
+
   /// Runs the stock conversion, then renames the map's sidecar files to match
   /// when -ConversionSuffix made a copy under a new name.
   virtual int32 Main(const FString& Params) override;
+
+private:
+
+  /// Signs PerformAdditionalActorChanges made always loaded, for the log.
+  mutable int32 NumAlwaysLoadedSigns = 0;
 };
