@@ -200,6 +200,8 @@ Only the start of the clock is set, not its rate: the simulation time still adva
 
 The option seeds the episode clock itself, not just the ROS 2 output, so `/clock`, every sensor's message header, `carla.Timestamp.elapsed_seconds`, and the timestamp on sensor data received through the Python API all share the same start time.
 
+Every sensor message is stamped with the simulation time of the frame it was captured in.
+
 ---
 ## Control data
 

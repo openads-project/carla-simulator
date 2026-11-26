@@ -287,6 +287,7 @@ protected:
         SensorTypeId,
         StreamId,
         Transform,
+        CaptureContext.Timestamp,
         W, H,
         Fov,
         BufferView,

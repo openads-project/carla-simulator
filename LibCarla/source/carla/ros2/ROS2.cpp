@@ -154,13 +154,17 @@ void ROS2::SetFrame(uint64_t frame) {
 #endif
 }
 
-void ROS2::SetTimestamp(double timestamp) {
+ROS2::Stamp ROS2::ToStamp(double timestamp) {
   double integral;
   const double fractional = std::modf(timestamp, &integral);
   const double multiplier = 1000000000.0;
-  const Stamp stamp{
+  return Stamp{
       static_cast<int32_t>(integral),
       static_cast<uint32_t>(fractional * multiplier)};
+}
+
+void ROS2::SetTimestamp(double timestamp) {
+  const Stamp stamp = ToStamp(timestamp);
   std::shared_ptr<CarlaClockPublisher> clock_publisher;
   {
     std::lock_guard<std::mutex> lock(_mutex);
@@ -597,10 +601,13 @@ void ROS2::ProcessDataFromCamera(
     uint64_t sensor_type,
     carla::streaming::detail::stream_id_type stream_id,
     const carla::geom::Transform sensor_transform,
+    double timestamp,
     int W, int H, float Fov,
     const carla::SharedBufferView buffer,
     void *actor) {
-  const Stamp stamp = GetStamp();
+  // The capture time, not GetStamp(): with the readback still in flight when
+  // the next tick starts, GetStamp() is already the next frame's stamp.
+  const Stamp stamp = ToStamp(timestamp);
   // Image dimensions + FOV are now read straight from ImageSerializer's
   // per-frame header inside the camera publisher's WriteCameraInfo call;
   // the W/H/Fov arguments survive for ABI compatibility with the
